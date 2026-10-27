@@ -1,0 +1,14 @@
+# Зависимости Node.js
+node_modules/
+
+# Скомпилированные файлы Rust (самое тяжелое)
+src-tauri/target/
+src-tauri/gen/
+
+# Скомпилированный фронтенд
+dist/
+
+# Системный мусор
+.DS_Store
+Thumbs.db
+*.log

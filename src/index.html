@@ -48,13 +48,15 @@
   .folder-row .name.ok { color: #a6e3a1; }
 
   .lists-layout { display: flex; gap: 20px; margin-top: 16px; }
-  .sidebar { flex: 0 0 260px; display: flex; flex-direction: column; gap: 16px; }
+  .sidebar { flex: 0 0 300px; display: flex; flex-direction: column; gap: 16px; }
   .file-list { background: #1e1e2e; border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 4px; max-height: 400px; overflow-y: auto; }
   .file-btn { background: transparent; color: #a6adc8; text-align: left; padding: 8px 12px; border-radius: 8px; font-family: 'Cascadia Code', monospace; font-size: 0.82rem; border: none; cursor: pointer; transition: all 0.15s; display: flex; justify-content: space-between; align-items: center; }
   .file-btn:hover { background: #313244; color: #cdd6f4; }
   .file-btn.active { background: #cba6f7; color: #1e1e2e; font-weight: bold; }
   .file-btn.user-file { color: #a6e3a1; }
   .file-btn.user-file.active { color: #1e1e2e; }
+  .file-btn .line-count { font-size: 0.7rem; color: #6c7086; margin-left: 8px; }
+  .file-btn.active .line-count { color: #313244; }
 
   .tool-box { background: #1e1e2e; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
   .tool-box h4 { color: #89b4fa; font-size: 0.9rem; margin-bottom: 4px; }
@@ -64,16 +66,60 @@
   .file-editor h3 { color: #f5c2e7; margin-bottom: 12px; font-family: 'Cascadia Code', monospace; font-size: 1.1rem; }
   .input-group { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .input-group input[type="text"] { flex: 1; min-width: 200px; background: #1e1e2e; border: 1px solid #585b70; color: #cdd6f4; padding: 8px 12px; border-radius: 8px; font-family: 'Cascadia Code', monospace; font-size: 0.88rem; outline: none; }
-  textarea { width: 100%; height: 400px; background: #45475a; border: 1px solid #585b70; border-radius: 12px; padding: 12px; color: #cdd6f4; font-family: 'Cascadia Code', monospace; font-size: 0.88rem; resize: vertical; outline: none; }
-  .stats { font-size: 0.82rem; color: #a6adc8; margin-top: 6px; margin-bottom: 10px; }
+  
+  /* ОБНОВЛЕННЫЙ РЕДАКТОР С НОМЕРАМИ СТРОК */
+  .editor-container {
+    display: flex;
+    background: #45475a;
+    border: 1px solid #585b70;
+    border-radius: 12px;
+    height: 400px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+
+  .line-numbers {
+    width: 45px;
+    background: #313244;
+    color: #6c7086;
+    font-family: 'Cascadia Code', monospace;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    text-align: right;
+    padding: 12px 8px 12px 0;
+    overflow: hidden;
+    user-select: none;
+    border-right: 1px solid #45475a;
+  }
+
+  textarea {
+    flex: 1;
+    height: 100%;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 12px;
+    color: #cdd6f4;
+    font-family: 'Cascadia Code', monospace;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    white-space: pre; /* Отключает перенос строк */
+    overflow: auto;
+  }
+
+  .stats { font-size: 0.82rem; color: #a6adc8; margin-top: 6px; margin-bottom: 10px; display: flex; justify-content: space-between; }
 
   .loading-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(30, 30, 46, 0.8); display: none; justify-content: center; align-items: center; font-size: 1.2rem; font-weight: bold; color: #cba6f7; z-index: 10; border-radius: 12px; }
 
-  .log { margin-top: 20px; max-height: 250px; overflow-y: auto; background: #1e1e2e; border-radius: 12px; padding: 14px; font-family: 'Cascadia Code', monospace; font-size: 0.85rem; line-height: 1.5; }
-  .log-line { color: #cdd6f4; }
+  .log { margin-top: 20px; max-height: 200px; overflow-y: auto; background: #1e1e2e; border-radius: 12px; padding: 14px; font-family: 'Cascadia Code', monospace; font-size: 0.85rem; line-height: 1.5; }
+  .log-line { color: #cdd6f4; margin-bottom: 4px; }
   .log-line.ok { color: #a6e3a1; }
   .log-line.err { color: #f38ba8; }
   .log-line.warn { color: #f9e2af; }
+  .error-link { color: #f38ba8; cursor: pointer; text-decoration: underline; }
+  .error-link:hover { color: #eba0ac; }
 
   .versions-list { display: flex; flex-direction: column; gap: 12px; }
   .version-card { background: #45475a; border-radius: 12px; padding: 16px; border: 2px solid transparent; display: flex; flex-direction: column; gap: 8px; }
@@ -82,6 +128,21 @@
   .version-card .name { font-family: 'Cascadia Code', monospace; font-size: 1.1rem; font-weight: bold; color: #89b4fa; }
   .version-card .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
   .vbadge { padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; background: #a6e3a1; color: #1e1e2e; }
+  /* Стили для раскрывающегося списка в корзине */
+  .trash-lines {
+    display: none;
+    background: #1e1e2e;
+    padding: 10px 14px;
+    border-radius: 8px;
+    margin-top: 10px;
+    font-family: 'Cascadia Code', monospace;
+    font-size: 0.85rem;
+    max-height: 200px;
+    overflow-y: auto;
+    color: #a6e3a1;
+    border: 1px solid #45475a;
+  }
+  .trash-lines.show { display: block; }
 </style>
 </head>
 <body>
@@ -129,9 +190,9 @@
     <button class="tab active" data-tab="lists">📋 Списки</button>
     <button class="tab" data-tab="import">📥 Импорт</button>
     <button class="tab" data-tab="versions">🔄 Версии</button>
+    <button class="tab" data-tab="trash">🗑️ Корзина</button> <!-- НОВАЯ ВКЛАДКА -->
   </div>
 
-  <!-- Вкладка СПИСКИ -->
   <div id="tab-lists" class="tab-content active">
     <div id="listsContent" style="display:none;">
       <div class="folder-row">
@@ -152,26 +213,33 @@
           <div class="input-group" style="margin-bottom:8px;">
             <input type="text" id="searchInput" placeholder="🔍 Поиск по файлу..." style="flex:1; border-color:#cba6f7;">
             <button id="searchBtn" class="secondary" style="padding:8px 12px;">Найти</button>
+            <button id="searchNextBtn" class="secondary" style="padding:8px 12px;" title="Следующее совпадение">⬇️ Далее</button>
           </div>
 
           <div class="input-group">
-            <input type="text" id="quickInput" placeholder="Введите домен или IP...">
+            <input type="text" id="quickInput" placeholder="Введите домены или IP (можно списком, поддерживается .рф)...">
             <button id="quickAddBtn">➕ Добавить</button>
           </div>
           
-          <textarea id="fileContent" placeholder="Содержимое файла..."></textarea>
-          <div class="stats" id="fileStats">Строк: 0</div>
+          <div class="editor-container" id="editorContainer">
+            <div class="line-numbers" id="lineNumbers">1</div>
+            <textarea id="fileContent" wrap="off" placeholder="Содержимое файла..."></textarea>
+          </div>
           
-          <button id="validateBtn" class="secondary" style="margin-bottom: 8px;">🔍 Проверить ошибки</button>
+          <div class="stats">
+            <span id="fileStats">Строк: 0</span>
+            <span id="errorIndicator" style="color:#f38ba8; display:none; font-weight:bold;">⚠️ Есть ошибки!</span>
+          </div>
+          
+          <button id="cleanValidateBtn" class="secondary" style="margin-bottom: 8px; background:#f9e2af; color:#1e1e2e;">✨ Проверить и очистить</button>
           <button id="saveFileBtn" class="big">💾 Сохранить файл</button>
           
-          <div id="fileLog" class="log" style="margin-top:12px; max-height:100px;"></div>
+          <div id="fileLog" class="log" style="margin-top:12px; max-height:150px;"></div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Вкладка ИМПОРТ -->
   <div id="tab-import" class="tab-content">
     <div class="folder-row"><button id="pickOld">📂 Старая папка</button><span id="oldName" class="name">не выбрана</span></div>
     <div class="folder-row"><button id="pickNew">📂 Новая папка</button><span id="newName" class="name">не выбрана</span></div>
@@ -179,13 +247,33 @@
     <div id="log" class="log"></div>
   </div>
 
-  <!-- Вкладка ВЕРСИИ -->
   <div id="tab-versions" class="tab-content">
     <div style="margin-bottom: 16px;">
       <button id="scanVersionsBtn">🔍 Сканировать версии</button>
     </div>
     <div class="versions-list" id="versionsList"></div>
     <div id="versionsLog" class="log"></div>
+  </div>
+</div>
+
+<div id="tab-trash" class="tab-content">
+  <div class="toolbar" style="display:flex; justify-content:space-between; margin-bottom:16px;">
+    <button id="emptyTrashBtn" class="danger">🗑️ Очистить корзину</button>
+    <div style="color:#a6adc8; font-size:0.9rem; align-self:center;">Файлы хранятся в папке <code>zapret_trash</code></div>
+  </div>
+  <div class="versions-list" id="trashList"></div>
+  <div id="trashLog" class="log" style="margin-top:16px;"></div>
+</div>
+
+<!-- КАСТОМНОЕ ОКНО ПОДТВЕРЖДЕНИЯ -->
+<div id="customConfirm" class="modal" style="display:none; z-index: 1000;">
+  <div class="modal-content" style="max-width: 400px; text-align: center;">
+    <h3 style="color: #f38ba8; margin-bottom: 16px;">Подтверждение</h3>
+    <p id="confirmMessage" style="margin-bottom: 24px; font-size: 1rem;"></p>
+    <div style="display: flex; gap: 12px; justify-content: center;">
+      <button id="confirmYes" class="danger" style="padding: 8px 24px;">Да, удалить</button>
+      <button id="confirmNo" class="secondary" style="padding: 8px 24px;">Отмена</button>
+    </div>
   </div>
 </div>
 
@@ -199,7 +287,7 @@ function logTo(el, msg, cls) {
   if (!el) return;
   const d = document.createElement('div');
   d.className = 'log-line ' + (cls || '');
-  d.textContent = msg;
+  d.innerHTML = msg;
   el.appendChild(d);
   el.scrollTop = el.scrollHeight;
 }
@@ -207,7 +295,6 @@ function logTo(el, msg, cls) {
 let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null };
 
 (async function init() {
-  // Автозапуск статус
   const autoStart = await isEnabled();
   $id('btnAutostart').textContent = autoStart ? '🚀 Автозапуск: ВКЛ' : '🚀 Автозапуск: ВЫКЛ';
   $id('btnAutostart').style.background = autoStart ? '#a6e3a1' : '#585b70';
@@ -221,24 +308,32 @@ let state = { rootPath: null, activeVersion: null, versions: [], currentListFile
     $id('quickActions').style.display = 'flex';
     $id('connectRootBtn').textContent = '📂 Сменить папку';
     $id('filterBar').style.display = 'flex';
-    
+
+    // 1. Сканируем версии
     await scanVersions(config.active_version);
-    
-    const runningPath = await invoke('find_running_winws');
-    if (runningPath && runningPath.toLowerCase().includes('\\bin\\winws.exe')) {
-        let rootDir = runningPath.substring(0, runningPath.lastIndexOf('\\'));
-        rootDir = rootDir.substring(0, rootDir.lastIndexOf('\\'));
-        const runningVersion = state.versions.find(v => v.path.toLowerCase() === rootDir.toLowerCase());
-        if (runningVersion) {
-            state.activeVersion = runningVersion;
-            $id('activeVersionBadge').style.display = '';
-            $id('activeVersionBadge').textContent = '✓ ' + state.activeVersion.name + ' (Запущена)';
-            await invoke('save_config', { config: { root_path: state.rootPath, active_version: state.activeVersion.name } });
-            loadListsTab();
-        }
+
+    // 2. Проверяем запущенный процесс ОДИН РАЗ и сразу делаем нужную версию активной
+    state.runningWinwsPath = await invoke('find_running_winws');
+    if (state.runningWinwsPath && state.runningWinwsPath.toLowerCase().includes('\\bin\\winws.exe')) {
+      let rootDir = state.runningWinwsPath.substring(0, state.runningWinwsPath.lastIndexOf('\\'));
+      rootDir = rootDir.substring(0, rootDir.lastIndexOf('\\'));
+      const runningVersion = state.versions.find(v => v.path.toLowerCase() === rootDir.toLowerCase());
+      if (runningVersion) {
+        state.activeVersion = runningVersion;
+        $id('activeVersionBadge').style.display = '';
+        $id('activeVersionBadge').textContent = '✓ ' + state.activeVersion.name + ' (Запущена)';
+        await invoke('save_config', { config: { root_path: state.rootPath, active_version: state.activeVersion.name } });
+        loadListsTab();
+      }
+    }
+
+    // Обновляем статус-бар
+    if (state.runningWinwsPath) {
+      $id('runningStatus').innerHTML = `✅ winws.exe запущен`;
+    } else {
+      $id('runningStatus').textContent = '⏸ winws.exe не запущен.';
     }
   }
-  await checkRunning();
 })();
 
 $id('btnAutostart').onclick = async () => {
@@ -280,7 +375,6 @@ async function scanVersions(preferredActive) {
     $id('listsContent').style.display = 'block';
     await invoke('save_config', { config: { root_path: state.rootPath, active_version: state.activeVersion.name } });
     
-    // Обновляем фильтры и стратегии
     const gameStatus = await invoke('get_game_filter_status', { versionPath: state.activeVersion.path });
     const ipsetStatus = await invoke('get_ipset_filter_status', { versionPath: state.activeVersion.path });
     $id('toggleGame').checked = gameStatus;
@@ -299,11 +393,8 @@ async function scanVersions(preferredActive) {
 async function checkRunning() {
   state.runningWinwsPath = await invoke('find_running_winws');
   if (state.runningWinwsPath) {
-    if (state.runningWinwsPath === "Служба запущена (нет прав для чтения пути)") {
-        $id('runningStatus').innerHTML = `✅ Служба zapret запущена`;
-    } else {
-        $id('runningStatus').innerHTML = `✅ winws.exe запущен`;
-    }
+    if (state.runningWinwsPath === "Служба запущена (нет прав для чтения пути)") $id('runningStatus').innerHTML = `✅ Служба zapret запущена`;
+    else $id('runningStatus').innerHTML = `✅ winws.exe запущен`;
     if (state.activeVersion && state.runningWinwsPath.toLowerCase().includes(state.activeVersion.name.toLowerCase())) {
         $id('activeVersionBadge').textContent = '✓ ' + state.activeVersion.name + ' (Запущена)';
     }
@@ -365,9 +456,12 @@ async function loadListsTab() {
   $id('listsActiveVersion').textContent = state.activeVersion.name;
   try {
     const files = await invoke('read_list_files', { versionPath: state.activeVersion.path });
-    $id('fileList').innerHTML = files.map(f => {
-      const isU = f.includes('-user');
-      return `<button class="file-btn ${f === state.currentListFile ? 'active' : ''} ${isU ? 'user-file' : ''}" data-file="${f}">${f}</button>`;
+    $id('fileList').innerHTML = files.map((f, i) => {
+      const isU = f.name.includes('-user');
+      return `<button class="file-btn ${f.name === state.currentListFile ? 'active' : ''} ${isU ? 'user-file' : ''}" data-file="${f.name}">
+        <span><span style="color:#6c78a0; margin-right:6px; font-size:0.75rem;">${i + 1}.</span>${f.name}</span> 
+        <span class="line-count">(${f.lines})</span>
+      </button>`;
     }).join('');
 
     $id('fileList').querySelectorAll('.file-btn').forEach(btn => {
@@ -377,7 +471,13 @@ async function loadListsTab() {
         selectListFile(btn.dataset.file);
       };
     });
-    if (!state.currentListFile && files.length > 0) selectListFile(files[0]);
+
+    if (!state.currentListFile) {
+      $id('currentFileName').textContent = 'Выберите файл слева';
+      $id('fileContent').value = '';
+      $id('lineNumbers').innerHTML = '1';
+      $id('fileStats').textContent = 'Строк: 0';
+    }
   } catch (e) { logTo($id('fileLog'), 'Ошибка списка: ' + e, 'err'); }
 }
 
@@ -385,23 +485,52 @@ async function selectListFile(filename) {
   state.currentListFile = filename;
   $id('currentFileName').textContent = filename;
   if ($id('fileLog')) $id('fileLog').innerHTML = '';
+  
+  $id('editorContainer').style.borderColor = '#585b70';
+  $id('errorIndicator').style.display = 'none';
+  
   const spinner = $id('fileLoading');
   if (spinner) spinner.style.display = 'flex';
   const textarea = $id('fileContent');
   if (textarea) textarea.value = ''; 
+  $id('lineNumbers').innerHTML = '1';
   
   setTimeout(async () => {
     try {
       const content = await invoke('read_list_file', { versionPath: state.activeVersion.path, fileName: filename });
       if (textarea) textarea.value = content;
       updateFileStats();
+      updateLineNumbers();
     } catch (e) { if (textarea) textarea.value = ''; } 
     finally { if (spinner) spinner.style.display = 'none'; }
   }, 50);
 }
 
+// --- ОТРИСОВКА НОМЕРОВ СТРОК ---
+function updateLineNumbers() {
+  const textarea = $id('fileContent');
+  const gutter = $id('lineNumbers');
+  if (!textarea || !gutter) return;
+
+  const lines = textarea.value.split('\n').length;
+  
+  if (gutter.childElementCount !== lines) {
+    let html = '';
+    for (let i = 1; i <= lines; i++) {
+      html += i + '<br>';
+    }
+    gutter.innerHTML = html;
+  }
+  gutter.scrollTop = textarea.scrollTop;
+}
+
+$id('fileContent').addEventListener('scroll', () => {
+  $id('lineNumbers').scrollTop = $id('fileContent').scrollTop;
+});
+
 let statsTimeout;
 function updateFileStats() {
+  updateLineNumbers();
   clearTimeout(statsTimeout);
   statsTimeout = setTimeout(() => {
     const textarea = $id('fileContent');
@@ -410,114 +539,212 @@ function updateFileStats() {
     const linesCount = text.split(/\r?\n/).length;
     let nonEmpty = 0;
     if (text.length > 0) { const matches = text.match(/\S+/g); nonEmpty = matches ? matches.length : 0; }
-    const statsEl = $id('fileStats');
-    if (statsEl) statsEl.textContent = `Строк: ${nonEmpty} (всего: ${linesCount})`;
+    $id('fileStats').textContent = `Строк: ${nonEmpty} (всего: ${linesCount})`;
   }, 300); 
 }
 
-const fileContentArea = $id('fileContent');
-if (fileContentArea) fileContentArea.addEventListener('input', updateFileStats);
+// --- УМНАЯ ПРОВЕРКА ПРИ ВВОДЕ ---
+let autoValidateTimeout;
+$id('fileContent').addEventListener('input', () => {
+  updateFileStats();
+  clearTimeout(autoValidateTimeout);
+  
+  $id('editorContainer').style.borderColor = '#585b70';
+  $id('errorIndicator').style.display = 'none';
+  
+  autoValidateTimeout = setTimeout(async () => {
+    if (!state.currentListFile) return;
+    const content = $id('fileContent').value;
+    if (!content) return;
+    const isIp = state.currentListFile.toLowerCase().includes('ipset');
+    const errors = await invoke('validate_list', { content, isIpList: isIp });
+    if (errors.length > 0) {
+      $id('editorContainer').style.borderColor = '#f38ba8';
+      $id('errorIndicator').style.display = 'inline';
+    }
+  }, 1500); 
+});
+
+// --- ПОИСК ВСЕХ СОВПАДЕНИЙ ---
+let searchMatches = [];
+let currentMatchIndex = -1;
 
 $id('searchBtn').onclick = () => {
   const query = $id('searchInput').value.trim();
   const textarea = $id('fileContent');
   if (!query) return;
-  const text = textarea.value;
-  const index = text.toLowerCase().indexOf(query.toLowerCase());
-  if (index !== -1) {
-    textarea.focus();
-    textarea.setSelectionRange(index, index + query.length);
-    const linesBefore = text.substring(0, index).split('\n').length;
-    textarea.scrollTop = (linesBefore * 18) - 50;
-  } else { alert('Не найдено!'); }
-};
-
-$id('validateBtn').onclick = async () => {
-  if (!state.currentListFile) return;
-  const content = $id('fileContent').value;
-  const isIp = state.currentListFile.toLowerCase().includes('ipset');
-  const errors = await invoke('validate_list', { content, isIpList: isIp });
-  if (errors.length === 0) logTo($id('fileLog'), '✅ Ошибок не найдено!', 'ok');
-  else {
-    logTo($id('fileLog'), `⚠️ Найдено ошибок: ${errors.length}`, 'err');
-    errors.slice(0, 10).forEach(err => logTo($id('fileLog'), err, 'warn'));
+  
+  const text = textarea.value.toLowerCase();
+  const searchStr = query.toLowerCase();
+  searchMatches = [];
+  
+  let pos = text.indexOf(searchStr);
+  while (pos !== -1) {
+    searchMatches.push(pos);
+    pos = text.indexOf(searchStr, pos + 1);
+  }
+  
+  if (searchMatches.length > 0) {
+    currentMatchIndex = 0;
+    jumpToMatch();
+  } else {
+    alert('Не найдено!');
   }
 };
 
-const updateZapretBtn = $id('updateZapretBtn');
-if (updateZapretBtn) {
-  updateZapretBtn.onclick = async () => {
-    if (!state.activeVersion) return alert('Сначала выберите версию!');
-    updateZapretBtn.disabled = true; updateZapretBtn.textContent = '⏳ Проверка версии...';
-    try {
-      const [local, remote] = await invoke('check_zapret_version', { versionPath: state.activeVersion.path });
-      if (local === remote) { alert(`✅ У вас самая свежая версия: ${local}`); return; }
-      if (!confirm(`Найдена новая версия!\nУ вас: ${local}\nДоступна: ${remote}\n\nСкачать и перенести настройки?`)) return;
-      
-      const oldName = state.activeVersion.name;
-      const oldPath = state.activeVersion.path;
-      updateZapretBtn.textContent = '⏳ Скачивание...';
-      
-      const newDirName = await invoke('download_zapret', { rootPath: state.rootPath, activeName: oldName, newVersion: remote });
-      await scanVersions(newDirName);
-      
-      if (confirm(`✅ Обновлено до ${remote}!\nУдалить старую версию (${oldName})?`)) {
-        await invoke('delete_version', { versionPath: oldPath });
-        await scanVersions(newDirName);
-      }
-    } catch(e) { alert('Ошибка: ' + e); } 
-    finally { updateZapretBtn.disabled = false; updateZapretBtn.textContent = '📥 Проверить и обновить'; }
-  };
+$id('searchNextBtn').onclick = () => {
+  if (searchMatches.length === 0) return;
+  currentMatchIndex = (currentMatchIndex + 1) % searchMatches.length;
+  jumpToMatch();
+};
+
+$id('searchInput').addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') $id('searchBtn').click();
+});
+
+function jumpToMatch() {
+  const textarea = $id('fileContent');
+  const query = $id('searchInput').value.trim();
+  const index = searchMatches[currentMatchIndex];
+  
+  // 1. Выделяем текст
+  textarea.focus();
+  textarea.setSelectionRange(index, index + query.length);
+  
+  // 2. Вычисляем точную высоту строки и отступы через браузер
+  const style = window.getComputedStyle(textarea);
+  const lineHeight = parseFloat(style.lineHeight);
+  const paddingTop = parseFloat(style.paddingTop);
+  
+  // 3. Считаем, на какой строке находится совпадение
+  const linesBefore = textarea.value.substring(0, index).split('\n').length;
+  
+  // 4. Скроллим так, чтобы строка была примерно по центру экрана
+  const targetScroll = ((linesBefore - 1) * lineHeight) + paddingTop - (textarea.clientHeight / 2) + (lineHeight / 2);
+  
+  textarea.scrollTop = targetScroll;
+  $id('lineNumbers').scrollTop = textarea.scrollTop; // Синхронизируем номера
 }
+
+// --- КЛИКАБЕЛЬНЫЕ ОШИБКИ ---
+$id('fileLog').addEventListener('click', (e) => {
+  if (e.target.classList.contains('error-link')) {
+    const lineNum = parseInt(e.target.dataset.line);
+    if (!lineNum) return;
+    
+    const textarea = $id('fileContent');
+    
+    // 1. Вычисляем точную высоту строки через браузер
+    const style = window.getComputedStyle(textarea);
+    const lineHeight = parseFloat(style.lineHeight);
+    const paddingTop = parseFloat(style.paddingTop);
+    
+    // 2. Скроллим к нужной строке
+    const targetScroll = ((lineNum - 1) * lineHeight) + paddingTop - (textarea.clientHeight / 2) + (lineHeight / 2);
+    
+    textarea.scrollTop = targetScroll;
+    $id('lineNumbers').scrollTop = textarea.scrollTop;
+    
+    // 3. Выделяем строку (для наглядности)
+    const lines = textarea.value.split('\n');
+    let charIndex = 0;
+    for (let i = 0; i < lineNum - 1; i++) {
+      charIndex += lines[i].length + 1;
+    }
+    textarea.focus();
+    textarea.setSelectionRange(charIndex, charIndex + lines[lineNum - 1].length);
+  }
+});
+// --- КНОПКА "ПРОВЕРИТЬ И ОЧИСТИТЬ" ---
+$id('cleanValidateBtn').onclick = async () => {
+  if (!state.currentListFile) return;
+  const content = $id('fileContent').value;
+  const isIp = state.currentListFile.toLowerCase().includes('ipset');
+  
+  $id('fileLog').innerHTML = '';
+  const [cleanedText, errors, removedCount] = await invoke('clean_and_validate', { content, isIpList: isIp });
+  
+  $id('fileContent').value = cleanedText;
+  updateFileStats();
+  updateLineNumbers();
+
+  if (errors.length === 0) {
+    $id('editorContainer').style.borderColor = '#585b70';
+    $id('errorIndicator').style.display = 'none';
+    
+    if (removedCount > 0) {
+      logTo($id('fileLog'), `✅ Список очищен (удалено дублей и мусора: ${removedCount}). Ошибок не найдено!`, 'ok');
+    } else {
+      logTo($id('fileLog'), `✅ Список уже чистый. Ошибок не найдено!`, 'ok');
+    }
+  } else {
+    $id('editorContainer').style.borderColor = '#f38ba8';
+    $id('errorIndicator').style.display = 'inline';
+    
+    if (removedCount > 0) {
+      logTo($id('fileLog'), `⚠️ Очищено (удалено дублей: ${removedCount}), но найдено ошибок: ${errors.length} (нажмите на ошибку для перехода):`, 'err');
+    } else {
+      logTo($id('fileLog'), `⚠️ Найдено ошибок: ${errors.length} (дублей не было):`, 'err');
+    }
+    
+    errors.forEach(err => {
+      const match = err.match(/Строка (\d+):/);
+      if (match) {
+        const line = match[1];
+        logTo($id('fileLog'), `<span class="error-link" data-line="${line}">${err}</span>`, 'warn');
+      } else { logTo($id('fileLog'), err, 'warn'); }
+    });
+  }
+};
+
+// --- УМНЫЙ ВВОД ---
+$id('quickAddBtn').onclick = async () => {
+  const input = $id('quickInput');
+  const raw = input.value.trim();
+  if (!raw) return;
+  
+  const [valid, invalid, converted] = await invoke('smart_parse_domains', { input: raw });
+  
+  const textarea = $id('fileContent');
+  let lines = textarea.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const seen = new Set(lines.map(s => s.toLowerCase()));
+  let added = 0;
+  
+  valid.forEach(item => {
+    if (!seen.has(item.toLowerCase())) { seen.add(item.toLowerCase()); lines.push(item); added++; }
+  });
+  
+  lines.sort();
+  textarea.value = lines.join('\n') + '\n';
+  input.value = '';
+  updateFileStats();
+  updateLineNumbers();
+  
+  $id('fileLog').innerHTML = '';
+  if (added > 0) logTo($id('fileLog'), `✅ Добавлено: ${added}`, 'ok');
+  if (converted > 0) logTo($id('fileLog'), `🔄 Домены .рф сконвертированы в Punycode: ${converted}`, 'ok');
+  if (invalid.length > 0) logTo($id('fileLog'), `⚠️ Пропущено невалидных: ${invalid.length} (${invalid.join(', ')})`, 'err');
+};
 
 const saveFileBtn = $id('saveFileBtn');
 if (saveFileBtn) {
   saveFileBtn.onclick = async () => {
     if (!state.currentListFile) return;
+    saveFileBtn.disabled = true;
     try {
-      await invoke('write_list_file', { versionPath: state.activeVersion.path, fileName: state.currentListFile, content: $id('fileContent').value });
-      logTo($id('fileLog'), 'Сохранено!', 'ok');
+      const resultMsg = await invoke('write_list_file', {
+        rootPath: state.rootPath, // <--- ВОТ ЭТА СТРОЧКА БЫЛА ПОТЕРЯНА
+        versionPath: state.activeVersion.path,
+        fileName: state.currentListFile,
+        content: $id('fileContent').value
+      });
+      logTo($id('fileLog'), `💾 ${resultMsg}`, 'ok');
+      const content = await invoke('read_list_file', { versionPath: state.activeVersion.path, fileName: state.currentListFile });
+      $id('fileContent').value = content;
+      updateFileStats();
+      updateLineNumbers();
     } catch(e) { logTo($id('fileLog'), 'Ошибка: ' + e, 'err'); }
-  };
-}
-// Обработчик кнопки "Сканировать версии"
-const scanVersionsBtn = $id('scanVersionsBtn');
-if (scanVersionsBtn) {
-  scanVersionsBtn.onclick = async () => {
-    if (!state.rootPath) return alert('Сначала выберите папку Zapret!');
-    
-    scanVersionsBtn.disabled = true;
-    scanVersionsBtn.textContent = '⏳ Сканирование...';
-    
-    try {
-      // Пересканируем папку, сохраняя текущую активную версию (если она есть)
-      await scanVersions(state.activeVersion ? state.activeVersion.name : null);
-    } catch(e) {
-      alert('Ошибка сканирования: ' + e);
-    } finally {
-      scanVersionsBtn.disabled = false;
-      scanVersionsBtn.textContent = '🔍 Сканировать версии';
-    }
-  };
-}
-const quickAddBtn = $id('quickAddBtn');
-if (quickAddBtn) {
-  quickAddBtn.onclick = () => {
-    const input = $id('quickInput');
-    const raw = input.value.trim();
-    if (!raw) return;
-    const textarea = $id('fileContent');
-    let lines = textarea.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    const seen = new Set(lines.map(s => s.toLowerCase()));
-    let added = 0;
-    raw.split(/[\s,;]+/).forEach(item => {
-      if (!seen.has(item.toLowerCase())) { seen.add(item.toLowerCase()); lines.push(item); added++; }
-    });
-    lines.sort();
-    textarea.value = lines.join('\n') + '\n';
-    input.value = '';
-    updateFileStats();
-    logTo($id('fileLog'), `Добавлено: ${added}`, 'ok');
+    finally { saveFileBtn.disabled = false; }
   };
 }
 
@@ -538,6 +765,45 @@ function renderVersions() {
 
 window.activate = async (name) => { state.activeVersion = state.versions.find(v => v.name === name); await scanVersions(name); };
 
+// --- ОБНОВЛЕНИЕ ВЕРСИИ ZAPRET ---
+const updateZapretBtn = $id('updateZapretBtn');
+if (updateZapretBtn) {
+  updateZapretBtn.onclick = async () => {
+    if (!state.activeVersion) return alert('Сначала выберите версию!');
+    
+    updateZapretBtn.disabled = true; 
+    updateZapretBtn.textContent = '⏳ Проверка версии...';
+    
+    try {
+      const [local, remote] = await invoke('check_zapret_version', { versionPath: state.activeVersion.path });
+      
+      if (local === remote) { 
+        alert(`✅ У вас самая свежая версия: ${local}`); 
+        return; 
+      }
+      
+      if (!confirm(`Найдена новая версия!\nУ вас: ${local}\nДоступна: ${remote}\n\nСкачать, распаковать и перенести настройки?`)) return;
+      
+      const oldName = state.activeVersion.name;
+      const oldPath = state.activeVersion.path;
+      updateZapretBtn.textContent = '⏳ Скачивание (может занять минуту)...';
+      
+      const newDirName = await invoke('download_zapret', { rootPath: state.rootPath, activeName: oldName, newVersion: remote });
+      await scanVersions(newDirName);
+      
+      if (confirm(`✅ Обновлено до ${remote}!\nУдалить старую версию (${oldName})?`)) {
+        await invoke('delete_version', { versionPath: oldPath });
+        await scanVersions(newDirName);
+      }
+    } catch(e) { 
+      alert('Ошибка обновления: ' + e); 
+    } finally { 
+      updateZapretBtn.disabled = false; 
+      updateZapretBtn.textContent = '📥 Проверить и обновить'; 
+    }
+  };
+}
+
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -545,6 +811,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.add('active');
     $id('tab-' + tab.dataset.tab).classList.add('active');
     if (tab.dataset.tab === 'lists') loadListsTab();
+    if (tab.dataset.tab === 'trash') loadTrashTab();
   };
 });
 
@@ -573,9 +840,124 @@ window.addEventListener('tauri://drag-drop', async (event) => {
         currentLines.sort();
         textarea.value = currentLines.join('\n') + '\n';
         updateFileStats();
+        updateLineNumbers();
         logTo($id('fileLog'), `📥 Из файла добавлено: ${added}`, 'ok');
     } catch(e) { alert('Ошибка чтения: ' + e); }
 });
+// --- КОРЗИНА ---
+async function loadTrashTab() {
+  if (!state.rootPath) return;
+  const list = $id('trashList');
+  list.innerHTML = '<div style="color:#a6adc8; padding:16px;">Загрузка...</div>';
+
+  try {
+    const files = await invoke('get_trash_files', { rootPath: state.rootPath });
+    state.trashFiles = files;
+
+    if (files.length === 0) {
+      list.innerHTML = '<div style="color:#a6adc8; padding:16px; text-align:center;">Корзина пуста.</div>';
+      return;
+    }
+
+    list.innerHTML = files.map(f => {
+      const date = new Date(f.time * 1000).toLocaleString('ru-RU');
+      return `
+        <div class="version-card" style="flex-direction:column; align-items:stretch; padding:12px 16px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+              <div style="font-weight:bold; color:#89b4fa; font-family:monospace;">${f.original_name}</div>
+              <div style="font-size:0.8rem; color:#a6adc8;">Удалено строк: <b>${f.deleted_lines.length}</b> | ${date}</div>
+            </div>
+            <div style="display:flex; gap:8px;">
+              <button class="small secondary" onclick="window.toggleTrashLines('${f.id}')">👁️ Показать</button>
+              <button class="small" onclick="window.restoreTrash('${f.id}')">↩️ Восстановить</button>
+            </div>
+          </div>
+          <div id="lines-${f.id}" class="trash-lines"><pre>${f.deleted_lines.join('\n')}</pre></div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) { list.innerHTML = `<div style="color:#f38ba8;">Ошибка: ${e}</div>`; }
+}
+
+window.toggleTrashLines = (id) => {
+  const el = document.getElementById(`lines-${id}`);
+  if (el) el.classList.toggle('show');
+};
+
+// --- КАСТОМНОЕ ОКНО ПОДТВЕРЖДЕНИЯ ---
+function showConfirm(message) {
+  return new Promise((resolve) => {
+    const modal = $id('customConfirm');
+    $id('confirmMessage').textContent = message;
+    modal.style.display = 'flex';
+
+    const btnYes = $id('confirmYes');
+    const btnNo = $id('confirmNo');
+
+    // Очищаем старые обработчики, чтобы не было двойных кликов
+    btnYes.onclick = null;
+    btnNo.onclick = null;
+
+    const close = (result) => {
+      modal.style.display = 'none';
+      resolve(result);
+    };
+
+    btnYes.onclick = () => close(true);
+    btnNo.onclick = () => close(false);
+  });
+}
+
+// --- ВОССТАНОВЛЕНИЕ ИЗ КОРЗИНЫ ---
+window.restoreTrash = async (trashId) => {
+  if (!state.activeVersion) return alert('Сначала выберите активную версию!');
+  const file = state.trashFiles.find(x => x.id === trashId);
+  if (!file) return;
+
+  // Вызываем кастомное окно
+  const isConfirmed = await showConfirm(`Восстановить ${file.deleted_lines.length} строк из "${file.original_name}"?`);
+  if (!isConfirmed) return; // Если нажали "Отмена", выходим
+
+  try {
+    await invoke('restore_trash_file', {
+      rootPath: state.rootPath,
+      versionPath: state.activeVersion.path,
+      trashId: file.id,
+      originalName: file.original_name,
+      deletedLines: file.deleted_lines
+    });
+
+    logTo($id('trashLog'), `✅ Строки из ${file.original_name} успешно возвращены в конец файла!`, 'ok');
+    loadTrashTab();
+
+    if (state.currentListFile === file.original_name) {
+      selectListFile(file.original_name);
+    }
+  } catch(e) { logTo($id('trashLog'), 'Ошибка восстановления: ' + e, 'err'); }
+};
+
+// --- ОЧИСТКА КОРЗИНЫ ---
+const emptyTrashBtn = $id('emptyTrashBtn');
+if (emptyTrashBtn) {
+  emptyTrashBtn.onclick = async (e) => {
+    e.preventDefault();
+    e.stopPropagation(); // Защита от всплытия события
+
+    if (!state.rootPath) return;
+
+    const isConfirmed = await showConfirm('Вы уверены, что хотите НАВСЕГДА удалить все файлы из корзины? Это действие нельзя отменить.');
+    if (!isConfirmed) return;
+
+    try {
+      await invoke('empty_trash', { rootPath: state.rootPath });
+      loadTrashTab();
+      logTo($id('trashLog'), 'Корзина успешно очищена.', 'warn');
+    } catch(e) {
+      alert('Ошибка при очистке: ' + e);
+    }
+  };
+}
 </script>
 </body>
 </html>

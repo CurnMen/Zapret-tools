@@ -23,3 +23,4 @@ sysinfo = "0.33"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 tokio = { version = "1", features = ["full"] }
 regex = "1"
+idna = "1"

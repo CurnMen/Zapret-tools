@@ -1,5 +1,6 @@
 ﻿use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
@@ -18,9 +19,23 @@ pub struct VersionInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TrashItem {
+    pub id: String,
+    pub original_name: String,
+    pub time: u64,
+    pub deleted_lines: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub root_path: Option<String>,
     pub active_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileInfo {
+    pub name: String,
+    pub lines: usize,
 }
 
 // --- ЛОГИКА СЛИЯНИЯ ---
@@ -46,7 +61,6 @@ fn merge_dirs(src: &Path, dst: &Path) -> std::io::Result<()> {
         let entry = entry?;
         let path = entry.path();
         let dst_path = dst.join(entry.file_name());
-
         if path.is_file() {
             if path.extension().and_then(|s| s.to_str()) == Some("txt") {
                 let old_text = fs::read_to_string(&path).unwrap_or_default();
@@ -105,35 +119,37 @@ fn scan_versions(base_path: String) -> Result<Vec<VersionInfo>, String> {
 }
 
 #[tauri::command]
-fn find_running_winws() -> Option<String> {
-    let mut sys = System::new_all();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-    for (_, process) in sys.processes() {
-        let name = process.name().to_string_lossy().to_lowercase();
-        if name.contains("winws") {
-            if let Some(exe_path) = process.exe() {
-                if !exe_path.to_string_lossy().is_empty() { return Some(exe_path.to_string_lossy().to_string()); }
+async fn find_running_winws() -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        let mut sys = System::new_all();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        for (_, process) in sys.processes() {
+            let name = process.name().to_string_lossy().to_lowercase();
+            if name.contains("winws") {
+                if let Some(exe_path) = process.exe() {
+                    if !exe_path.to_string_lossy().is_empty() { return Some(exe_path.to_string_lossy().to_string()); }
+                }
             }
         }
-    }
-    let output = Command::new("reg").args(&["query", "HKLM\\System\\CurrentControlSet\\Services\\zapret", "/v", "ImagePath"]).output();
-    if let Ok(out) = output {
-        if out.status.success() {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines() {
-                if line.contains("ImagePath") {
-                    if let Some(start_quote) = line.find('"') {
-                        let rest = &line[start_quote + 1..];
-                        if let Some(end_quote) = rest.find('"') {
-                            let path = &rest[..end_quote];
-                            if path.contains("winws.exe") { return Some(path.to_string()); }
+        let output = Command::new("reg").args(&["query", "HKLM\\System\\CurrentControlSet\\Services\\zapret", "/v", "ImagePath"]).output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                for line in stdout.lines() {
+                    if line.contains("ImagePath") {
+                        if let Some(start_quote) = line.find('"') {
+                            let rest = &line[start_quote + 1..];
+                            if let Some(end_quote) = rest.find('"') {
+                                let path = &rest[..end_quote];
+                                if path.contains("winws.exe") { return Some(path.to_string()); }
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    None
+        None
+    }).await.unwrap_or(None)
 }
 
 #[tauri::command]
@@ -166,22 +182,30 @@ fn manage_service(version_path: String, action: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn read_list_files(version_path: String) -> Result<Vec<String>, String> {
-    let mut files = Vec::new();
-    let p1 = Path::new(&version_path).join("lists");
-    let p2 = Path::new(&version_path).join("zapret-data").join("lists");
-    let target = if p1.exists() { p1 } else { p2 };
-    if target.exists() {
-        if let Ok(entries) = fs::read_dir(target) {
-            for entry in entries.flatten() {
-                if entry.path().extension().and_then(|s| s.to_str()) == Some("txt") {
-                    files.push(entry.file_name().to_string_lossy().to_string());
+async fn read_list_files(version_path: String) -> Result<Vec<FileInfo>, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        let p1 = Path::new(&version_path).join("lists");
+        let p2 = Path::new(&version_path).join("zapret-data").join("lists");
+        let target = if p1.exists() { p1 } else { p2 };
+        if target.exists() {
+            if let Ok(entries) = fs::read_dir(target) {
+                for entry in entries.flatten() {
+                    if entry.path().extension().and_then(|s| s.to_str()) == Some("txt") {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let mut lines = 0;
+                        if let Ok(file) = fs::File::open(entry.path()) {
+                            let reader = BufReader::new(file);
+                            lines = reader.lines().filter(|l| l.is_ok()).count();
+                        }
+                        files.push(FileInfo { name, lines });
+                    }
                 }
             }
         }
-    }
-    files.sort();
-    Ok(files)
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(files)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -193,14 +217,128 @@ fn read_list_file(version_path: String, file_name: String) -> Result<String, Str
 }
 
 #[tauri::command]
-fn write_list_file(version_path: String, file_name: String, content: String) -> Result<(), String> {
-    let p1 = Path::new(&version_path).join("lists");
-    let p2 = Path::new(&version_path).join("zapret-data").join("lists");
+fn write_list_file(root_path: String, version_path: String, file_name: String, content: String) -> Result<String, String> {
+    let p1 = Path::new(&version_path).join("lists").join(&file_name);
+    let p2 = Path::new(&version_path).join("zapret-data").join("lists").join(&file_name);
     let target = if p1.exists() { p1 } else { p2 };
-    if !target.exists() { fs::create_dir_all(&target).map_err(|e| e.to_string())?; }
-    fs::write(target.join(file_name), content).map_err(|e| e.to_string())
+
+    if !target.exists() {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let old_text = fs::read_to_string(&target).unwrap_or_default();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut cleaned_lines = Vec::new();
+    let mut removed_count = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        let lower = trimmed.to_lowercase();
+        if seen.contains(&lower) { removed_count += 1; }
+        else {
+            seen.insert(lower);
+            cleaned_lines.push(trimmed.to_string());
+        }
+    }
+
+    let mut new_lines_set = std::collections::HashSet::new();
+    for line in &cleaned_lines { new_lines_set.insert(line.to_lowercase()); }
+
+    let mut deleted_lines = Vec::new();
+    for old_line in old_text.lines() {
+        let s = old_line.trim();
+        if !s.is_empty() && !new_lines_set.contains(&s.to_lowercase()) {
+            deleted_lines.push(s.to_string());
+        }
+    }
+
+    if !deleted_lines.is_empty() {
+        let trash_dir = Path::new(&root_path).join("zapret_trash");
+        if !trash_dir.exists() { let _ = fs::create_dir_all(&trash_dir); }
+
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let trash_id = format!("trash_{}.json", timestamp);
+        let trash_data = TrashItem {
+            id: trash_id.clone(),
+            original_name: file_name.clone(),
+            time: timestamp,
+            deleted_lines: deleted_lines.clone(),
+        };
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&trash_data) {
+            let _ = fs::write(trash_dir.join(trash_id), json_str);
+        }
+    }
+
+    let final_content = cleaned_lines.join("\n") + "\n";
+    fs::write(target, final_content).map_err(|e| e.to_string())?;
+
+    Ok(format!("Сохранено. Удалено дубликатов: {}. В корзину отправлено строк: {}", removed_count, deleted_lines.len()))
 }
 
+// --- КОМАНДЫ КОРЗИНЫ ---
+#[tauri::command]
+fn get_trash_files(root_path: String) -> Result<Vec<TrashItem>, String> {
+    let trash_dir = Path::new(&root_path).join("zapret_trash");
+    let mut files = Vec::new();
+    if trash_dir.exists() {
+        if let Ok(entries) = fs::read_dir(trash_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if let Ok(item) = serde_json::from_str::<TrashItem>(&content) {
+                            files.push(item);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    files.sort_by(|a, b| b.time.cmp(&a.time));
+    Ok(files)
+}
+
+#[tauri::command]
+fn restore_trash_file(root_path: String, version_path: String, trash_id: String, original_name: String, deleted_lines: Vec<String>) -> Result<(), String> {
+    let trash_file = Path::new(&root_path).join("zapret_trash").join(&trash_id);
+    let p1 = Path::new(&version_path).join("lists").join(&original_name);
+    let p2 = Path::new(&version_path).join("zapret-data").join("lists").join(&original_name);
+    let target = if p1.exists() { p1 } else { p2 };
+
+    if let Some(parent) = target.parent() {
+        if !parent.exists() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+    }
+
+    let mut current_content = fs::read_to_string(&target).unwrap_or_default();
+    if !current_content.ends_with('\n') && !current_content.is_empty() {
+        current_content.push('\n');
+    }
+
+    for line in deleted_lines {
+        current_content.push_str(&line);
+        current_content.push('\n');
+    }
+
+    fs::write(&target, current_content).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(trash_file);
+    Ok(())
+}
+
+#[tauri::command]
+fn empty_trash(root_path: String) -> Result<(), String> {
+    let trash_dir = Path::new(&root_path).join("zapret_trash");
+    if trash_dir.exists() {
+        fs::remove_dir_all(&trash_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// --- ОСТАЛЬНЫЕ КОМАНДЫ ---
 #[tauri::command]
 fn read_external_file(path: String) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| e.to_string())
@@ -245,32 +383,88 @@ fn validate_list(content: String, is_ip_list: bool) -> Result<Vec<String>, Strin
             }
         } else {
             let mut check_line = line;
+            if check_line.starts_with('^') { check_line = &check_line[1..]; }
+            if let Some(pos) = check_line.find(':') { check_line = &check_line[pos + 1..]; }
+            if let Some(pos) = check_line.find('@') { check_line = &check_line[..pos]; }
 
-            // 1. Убираем символ ^ (начало строки) в начале
-            if check_line.starts_with('^') {
-                check_line = &check_line[1..];
-            }
-
-            // 2. Убираем префиксы Zapret (например, full:, fake:)
-            if let Some(pos) = check_line.find(':') {
-                check_line = &check_line[pos + 1..];
-            }
-            
-            // 3. Убираем суффиксы (например, @cn)
-            if let Some(pos) = check_line.find('@') {
-                check_line = &check_line[..pos];
-            }
-
-            // Очищаем от пробелов по краям еще раз
-            let final_domain = check_line.trim();
-
-            if !domain_regex.is_match(final_domain) {
+            if !domain_regex.is_match(check_line.trim()) {
                 errors.push(format!("Строка {}: '{}' — неверный домен", index + 1, line));
             }
         }
     }
     Ok(errors)
 }
+
+#[tauri::command]
+fn smart_parse_domains(input: String) -> Result<(Vec<String>, Vec<String>, usize), String> {
+    let mut valid = Vec::new();
+    let mut invalid = Vec::new();
+    let mut converted = 0;
+
+    let tokens = input.split(|c: char| c.is_whitespace() || c == ',' || c == ';');
+    let domain_regex = regex::Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$").unwrap();
+
+    for token in tokens {
+        let t = token.trim();
+        if t.is_empty() { continue; }
+
+        let mut check_domain = t.to_string();
+
+        if !check_domain.is_ascii() {
+            if let Ok(puny) = idna::domain_to_ascii(&check_domain) {
+                check_domain = puny;
+                converted += 1;
+            } else {
+                invalid.push(t.to_string());
+                continue;
+            }
+        }
+
+        if domain_regex.is_match(&check_domain) {
+            valid.push(check_domain);
+        } else {
+            invalid.push(t.to_string());
+        }
+    }
+    Ok((valid, invalid, converted))
+}
+
+#[tauri::command]
+fn clean_and_validate(content: String, is_ip_list: bool) -> Result<(String, Vec<String>, usize), String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut cleaned_lines = Vec::new();
+    let mut removed_count = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            removed_count += 1;
+            continue;
+        }
+
+        let mut check_domain = trimmed.to_string();
+        if !is_ip_list && !check_domain.is_ascii() {
+            if let Ok(puny) = idna::domain_to_ascii(&check_domain) {
+                check_domain = puny;
+            }
+        }
+
+        let lower = check_domain.to_lowercase();
+        if seen.insert(lower) {
+            cleaned_lines.push(check_domain);
+        } else {
+            removed_count += 1;
+        }
+    }
+
+    cleaned_lines.sort();
+
+    let final_text = cleaned_lines.join("\n") + if cleaned_lines.is_empty() { "" } else { "\n" };
+    let errors = validate_list(final_text.clone(), is_ip_list)?;
+
+    Ok((final_text, errors, removed_count))
+}
+
 #[tauri::command]
 async fn check_zapret_version(version_path: String) -> Result<(String, String), String> {
     let bat_path = Path::new(&version_path).join("service.bat");
@@ -339,13 +533,12 @@ fn create_start_menu_shortcut() -> Result<(), String> {
     Ok(())
 }
 
-// --- ТУМБЛЕРЫ И СТРАТЕГИИ ---
 #[tauri::command]
 fn toggle_game_filter(version_path: String, enable: bool) -> Result<(), String> {
     let utils_dir = Path::new(&version_path).join("utils");
     if !utils_dir.exists() { fs::create_dir_all(&utils_dir).map_err(|e| e.to_string())?; }
     let flag_file = utils_dir.join("game_filter.enabled");
-    if enable { fs::write(flag_file, "ENABLED").map_err(|e| e.to_string())?; } 
+    if enable { fs::write(flag_file, "ENABLED").map_err(|e| e.to_string())?; }
     else { if flag_file.exists() { fs::remove_file(flag_file).map_err(|e| e.to_string())?; } }
     Ok(())
 }
@@ -379,7 +572,7 @@ fn toggle_ipset_filter(version_path: String, enable: bool) -> Result<(), String>
 fn get_ipset_filter_status(version_path: String) -> bool {
     let list_file = Path::new(&version_path).join("lists").join("ipset-all.txt");
     if let Ok(content) = fs::read_to_string(list_file) {
-        return content.lines().filter(|l| !l.trim().is_empty()).count() > 1; 
+        return content.lines().filter(|l| !l.trim().is_empty()).count() > 1;
     }
     false
 }
@@ -409,13 +602,20 @@ fn install_strategy(version_path: String, strategy_name: String) -> Result<(), S
     } else { Err("Стратегия не найдена".into()) }
 }
 
-// --- ЗАПУСК ПРИЛОЖЕНИЯ И ТРЕЙ ---
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![])))
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .setup(|app| {
+            // Скрываем окно при автозапуске
+            let args: Vec<String> = std::env::args().collect();
+            if args.contains(&"--minimized".to_string()) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
             // Создаем меню для трея
             let show = MenuItem::with_id(app, "show", "Открыть", true, None::<&str>)?;
             let start = MenuItem::with_id(app, "start", "Старт", true, None::<&str>)?;
@@ -423,7 +623,6 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &start, &stop, &quit])?;
 
-            // Инициализируем иконку трея
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
@@ -436,15 +635,9 @@ pub fn run() {
                                 let _ = window.set_focus();
                             }
                         }
-                        "start" => {
-                            let _ = Command::new("powershell").args(&["-NoProfile", "-Command", "Start-Process sc -ArgumentList 'start zapret' -Verb RunAs"]).spawn();
-                        }
-                        "stop" => {
-                            let _ = Command::new("powershell").args(&["-NoProfile", "-Command", "Start-Process sc -ArgumentList 'stop zapret' -Verb RunAs"]).spawn();
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
+                        "start" => { let _ = Command::new("powershell").args(&["-NoProfile", "-Command", "Start-Process sc -ArgumentList 'start zapret' -Verb RunAs"]).spawn(); }
+                        "stop" => { let _ = Command::new("powershell").args(&["-NoProfile", "-Command", "Start-Process sc -ArgumentList 'stop zapret' -Verb RunAs"]).spawn(); }
+                        "quit" => { app.exit(0); }
                         _ => {}
                     }
                 })
@@ -460,10 +653,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config, save_config, scan_versions, find_running_winws,
             open_folder, run_as_admin, manage_service, read_list_files, read_list_file,
-            write_list_file, merge_folders, sync_github, validate_list, 
+            write_list_file, merge_folders, sync_github, validate_list,
             check_zapret_version, download_zapret, delete_version, create_start_menu_shortcut,
             read_external_file, toggle_game_filter, get_game_filter_status,
-            toggle_ipset_filter, get_ipset_filter_status, list_strategies, install_strategy
+            toggle_ipset_filter, get_ipset_filter_status, list_strategies, install_strategy,
+            smart_parse_domains, clean_and_validate,
+            get_trash_files, restore_trash_file, empty_trash // <-- ДОБАВЛЕНЫ КОМАНДЫ КОРЗИНЫ
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

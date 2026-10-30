@@ -5479,6 +5479,7 @@ dependencies = [
 name = "zapret-tools"
 version = "1.0.0"
 dependencies = [
+ "idna",
  "regex",
  "reqwest 0.12.28",
  "serde",

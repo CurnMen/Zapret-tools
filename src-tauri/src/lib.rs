@@ -55,6 +55,51 @@ fn merge_text(old_t: &str, new_t: &str) -> String {
     out.join("\n") + "\n"
 }
 
+// Разбивает строку Zapret на (префикс, тело-домена, суффикс).
+// Примеры:
+//   "full:example.com"    -> ("full:", "example.com", "")
+//   "^example.com@cn"     -> ("^", "example.com", "@cn")
+//   "@cn.example.com"     -> ("@cn.", "example.com", "")
+//   "example.com"         -> ("", "example.com", "")
+fn split_zapret_line(line: &str) -> (String, String, String) {
+    let mut prefix = String::new();
+    let mut rest = line;
+
+    while let Some(s) = rest.strip_prefix('^') {
+        prefix.push('^');
+        rest = s;
+    }
+
+    if let Some(pos) = rest.find(':') {
+        prefix.push_str(&rest[..=pos]);
+        rest = &rest[pos + 1..];
+    }
+
+    if let Some(stripped) = rest.strip_prefix('@') {
+        if let Some(dot) = stripped.find('.') {
+            let tag = &stripped[..dot];
+            if !tag.is_empty() && tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                prefix.push('@');
+                prefix.push_str(tag);
+                prefix.push('.');
+                rest = &stripped[dot + 1..];
+            }
+        }
+    }
+
+    let mut suffix = String::new();
+    if let Some(pos) = rest.rfind('@') {
+        suffix = rest[pos..].to_string();
+        rest = &rest[..pos];
+    }
+
+    (prefix, rest.to_string(), suffix)
+}
+
+fn is_valid_domain_body(body: &str, domain_regex: &regex::Regex) -> bool {
+    domain_regex.is_match(body.trim())
+}
+
 fn merge_dirs(src: &Path, dst: &Path) -> std::io::Result<()> {
     if !dst.exists() { fs::create_dir_all(dst)?; }
     for entry in fs::read_dir(src)? {
@@ -260,8 +305,9 @@ fn write_list_file(root_path: String, version_path: String, file_name: String, c
         let trash_dir = Path::new(&root_path).join("zapret_trash");
         if !trash_dir.exists() { let _ = fs::create_dir_all(&trash_dir); }
 
-        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let trash_id = format!("trash_{}.json", timestamp);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let timestamp = now.as_secs();
+        let trash_id = format!("trash_{}_{:09}.json", timestamp, now.subsec_nanos());
         let trash_data = TrashItem {
             id: trash_id.clone(),
             original_name: file_name.clone(),
@@ -304,7 +350,7 @@ fn get_trash_files(root_path: String) -> Result<Vec<TrashItem>, String> {
 }
 
 #[tauri::command]
-fn restore_trash_file(root_path: String, version_path: String, trash_id: String, original_name: String, deleted_lines: Vec<String>) -> Result<(), String> {
+fn restore_trash_file(root_path: String, version_path: String, trash_id: String, original_name: String, deleted_lines: Vec<String>) -> Result<String, String> {
     let trash_file = Path::new(&root_path).join("zapret_trash").join(&trash_id);
     let p1 = Path::new(&version_path).join("lists").join(&original_name);
     let p2 = Path::new(&version_path).join("zapret-data").join("lists").join(&original_name);
@@ -319,14 +365,29 @@ fn restore_trash_file(root_path: String, version_path: String, trash_id: String,
         current_content.push('\n');
     }
 
+    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in current_content.lines() {
+        let s = line.trim();
+        if !s.is_empty() { existing.insert(s.to_lowercase()); }
+    }
+
+    let mut restored = 0usize;
+    let mut skipped = 0usize;
     for line in deleted_lines {
-        current_content.push_str(&line);
-        current_content.push('\n');
+        let s = line.trim();
+        if s.is_empty() { continue; }
+        if existing.insert(s.to_lowercase()) {
+            current_content.push_str(s);
+            current_content.push('\n');
+            restored += 1;
+        } else {
+            skipped += 1;
+        }
     }
 
     fs::write(&target, current_content).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(trash_file);
-    Ok(())
+    Ok(format!("Восстановлено строк: {}. Пропущено дубликатов: {}.", restored, skipped))
 }
 
 #[tauri::command]
@@ -382,12 +443,8 @@ fn validate_list(content: String, is_ip_list: bool) -> Result<Vec<String>, Strin
                 errors.push(format!("Строка {}: '{}' — неверный IP", index + 1, line));
             }
         } else {
-            let mut check_line = line;
-            if check_line.starts_with('^') { check_line = &check_line[1..]; }
-            if let Some(pos) = check_line.find(':') { check_line = &check_line[pos + 1..]; }
-            if let Some(pos) = check_line.find('@') { check_line = &check_line[..pos]; }
-
-            if !domain_regex.is_match(check_line.trim()) {
+            let (_, body, _) = split_zapret_line(line);
+            if body.is_empty() || !is_valid_domain_body(&body, &domain_regex) {
                 errors.push(format!("Строка {}: '{}' — неверный домен", index + 1, line));
             }
         }
@@ -408,20 +465,22 @@ fn smart_parse_domains(input: String) -> Result<(Vec<String>, Vec<String>, usize
         let t = token.trim();
         if t.is_empty() { continue; }
 
-        let mut check_domain = t.to_string();
+        let (prefix, body, suffix) = split_zapret_line(t);
+        if body.is_empty() {
+            invalid.push(t.to_string());
+            continue;
+        }
 
-        if !check_domain.is_ascii() {
-            if let Ok(puny) = idna::domain_to_ascii(&check_domain) {
-                check_domain = puny;
-                converted += 1;
-            } else {
-                invalid.push(t.to_string());
-                continue;
+        let mut body_out = body;
+        if !body_out.is_ascii() {
+            match idna::domain_to_ascii(&body_out) {
+                Ok(puny) => { body_out = puny; converted += 1; }
+                Err(_) => { invalid.push(t.to_string()); continue; }
             }
         }
 
-        if domain_regex.is_match(&check_domain) {
-            valid.push(check_domain);
+        if is_valid_domain_body(&body_out, &domain_regex) {
+            valid.push(format!("{}{}{}", prefix, body_out, suffix));
         } else {
             invalid.push(t.to_string());
         }
@@ -442,16 +501,24 @@ fn clean_and_validate(content: String, is_ip_list: bool) -> Result<(String, Vec<
             continue;
         }
 
-        let mut check_domain = trimmed.to_string();
-        if !is_ip_list && !check_domain.is_ascii() {
-            if let Ok(puny) = idna::domain_to_ascii(&check_domain) {
-                check_domain = puny;
-            }
-        }
+        let processed = if is_ip_list {
+            trimmed.to_string()
+        } else {
+            let (prefix, body, suffix) = split_zapret_line(trimmed);
+            if body.is_empty() { removed_count += 1; continue; }
 
-        let lower = check_domain.to_lowercase();
+            let mut body_out = body;
+            if !body_out.is_ascii() {
+                if let Ok(puny) = idna::domain_to_ascii(&body_out) {
+                    body_out = puny;
+                }
+            }
+            format!("{}{}{}", prefix, body_out, suffix)
+        };
+
+        let lower = processed.to_lowercase();
         if seen.insert(lower) {
-            cleaned_lines.push(check_domain);
+            cleaned_lines.push(processed);
         } else {
             removed_count += 1;
         }
@@ -500,7 +567,15 @@ async fn download_zapret(root_path: String, active_name: String, new_version: St
     if status.is_err() || !status.unwrap().success() { return Err("Не удалось распаковать архив".into()); }
 
     let extracted_content = extract_dir.join("zapret-discord-youtube-main");
-    if new_dir.exists() { let _ = fs::remove_dir_all(&new_dir); }
+
+    if new_dir.exists() {
+        let _ = fs::remove_file(&zip_path);
+        let _ = fs::remove_dir_all(&extract_dir);
+        return Err(format!(
+            "Папка '{}' уже существует. Удалите её вручную и повторите обновление.",
+            new_dir_name
+        ));
+    }
     fs::rename(&extracted_content, &new_dir).map_err(|e| e.to_string())?;
 
     let _ = fs::remove_file(&zip_path);
@@ -608,7 +683,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .setup(|app| {
-            // Скрываем окно при автозапуске
             let args: Vec<String> = std::env::args().collect();
             if args.contains(&"--minimized".to_string()) {
                 if let Some(window) = app.get_webview_window("main") {
@@ -616,7 +690,6 @@ pub fn run() {
                 }
             }
 
-            // Создаем меню для трея
             let show = MenuItem::with_id(app, "show", "Открыть", true, None::<&str>)?;
             let start = MenuItem::with_id(app, "start", "Старт", true, None::<&str>)?;
             let stop = MenuItem::with_id(app, "stop", "Стоп", true, None::<&str>)?;
@@ -658,7 +731,7 @@ pub fn run() {
             read_external_file, toggle_game_filter, get_game_filter_status,
             toggle_ipset_filter, get_ipset_filter_status, list_strategies, install_strategy,
             smart_parse_domains, clean_and_validate,
-            get_trash_files, restore_trash_file, empty_trash // <-- ДОБАВЛЕНЫ КОМАНДЫ КОРЗИНЫ
+            get_trash_files, restore_trash_file, empty_trash
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

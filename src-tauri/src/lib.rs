@@ -38,6 +38,12 @@ pub struct FileInfo {
     pub lines: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeadDomainReport {
+    pub checked: usize,
+    pub dead: Vec<String>,
+}
+
 // --- ЛОГИКА СЛИЯНИЯ ---
 fn merge_text(old_t: &str, new_t: &str) -> String {
     let mut seen = std::collections::HashSet::new();
@@ -532,6 +538,120 @@ fn clean_and_validate(content: String, is_ip_list: bool) -> Result<(String, Vec<
     Ok((final_text, errors, removed_count))
 }
 
+// Оставляет от каждого домена только регистрируемый корень (psl) и убирает дубли.
+#[tauri::command]
+fn consolidate_subdomains(content: String) -> Result<(String, usize), String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut input_count = 0usize;
+
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() { continue; }
+        input_count += 1;
+
+        if line.starts_with('#') {
+            if seen.insert(line.to_lowercase()) { out.push(line.to_string()); }
+            continue;
+        }
+
+        let (prefix, body, suffix) = split_zapret_line(line);
+        let body_lower = body.trim().to_lowercase();
+        let is_ip = body_lower.contains('/') || std::net::IpAddr::from_str(&body_lower).is_ok();
+        // Не трогаем всё, что не похоже на обычный домен (wildcard, порт, мусор).
+        let is_plain_domain = body_lower.contains('.')
+            && body_lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+
+        let consolidated = if is_ip || !is_plain_domain {
+            line.to_string()
+        } else {
+            match psl::domain_str(&body_lower) {
+                Some(root) => format!("{}{}{}", prefix, root, suffix),
+                None => line.to_string(),
+            }
+        };
+
+        if seen.insert(consolidated.to_lowercase()) {
+            out.push(consolidated);
+        }
+    }
+
+    let removed = input_count.saturating_sub(out.len());
+    let text = if out.is_empty() { String::new() } else { out.join("\n") + "\n" };
+    Ok((text, removed))
+}
+
+async fn probe_domain(client: &reqwest::Client, domain: &str) -> Option<String> {
+    let https = format!("https://{}/", domain);
+    if client.head(&https).send().await.is_ok() {
+        return None;
+    }
+    let http = format!("http://{}/", domain);
+    if client.head(&http).send().await.is_ok() {
+        return None;
+    }
+    Some(domain.to_string())
+}
+
+// Проверяет домены из содержимого файла HEAD-запросами (таймаут 3 c, 32 параллельно).
+#[tauri::command]
+async fn check_dead_domains(content: String) -> Result<DeadDomainReport, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut targets: Vec<String> = Vec::new();
+
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let (_, body, _) = split_zapret_line(line);
+        let body = body.trim().trim_end_matches('.').to_lowercase();
+        if body.is_empty() || !body.contains('.') { continue; }
+        if body.contains('/') || std::net::IpAddr::from_str(&body).is_ok() { continue; }
+        if !body.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') { continue; }
+        if seen.insert(body.clone()) { targets.push(body); }
+    }
+
+    let checked = targets.len();
+    if checked == 0 {
+        return Ok(DeadDomainReport { checked, dead: Vec::new() });
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("ZapretTools/1.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    const CONCURRENCY: usize = 32;
+    let mut iter = targets.into_iter();
+    let mut set = tokio::task::JoinSet::new();
+    let mut dead: Vec<String> = Vec::new();
+
+    for _ in 0..CONCURRENCY {
+        match iter.next() {
+            Some(domain) => {
+                let client = client.clone();
+                set.spawn(async move { probe_domain(&client, &domain).await });
+            }
+            None => break,
+        }
+    }
+
+    while let Some(result) = set.join_next().await {
+        if let Ok(Some(domain)) = result {
+            dead.push(domain);
+        }
+        if let Some(domain) = iter.next() {
+            let client = client.clone();
+            set.spawn(async move { probe_domain(&client, &domain).await });
+        }
+    }
+
+    dead.sort();
+    Ok(DeadDomainReport { checked, dead })
+}
+
 #[tauri::command]
 async fn check_zapret_version(version_path: String) -> Result<(String, String), String> {
     let bat_path = Path::new(&version_path).join("service.bat");
@@ -682,6 +802,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let args: Vec<String> = std::env::args().collect();
             if args.contains(&"--minimized".to_string()) {
@@ -731,6 +852,7 @@ pub fn run() {
             read_external_file, toggle_game_filter, get_game_filter_status,
             toggle_ipset_filter, get_ipset_filter_status, list_strategies, install_strategy,
             smart_parse_domains, clean_and_validate,
+            consolidate_subdomains, check_dead_domains,
             get_trash_files, restore_trash_file, empty_trash
         ])
         .run(tauri::generate_context!())

@@ -17,6 +17,14 @@
     ],
     "security": { "csp": null }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/example/zapret-tools/releases/latest/download/latest.json"
+      ],
+      "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],

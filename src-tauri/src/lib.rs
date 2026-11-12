@@ -244,6 +244,13 @@ async fn read_list_files(version_path: String) -> Result<Vec<FileInfo>, String> 
                 for entry in entries.flatten() {
                     if entry.path().extension().and_then(|s| s.to_str()) == Some("txt") {
                         let name = entry.file_name().to_string_lossy().to_string();
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        // Файлы больше 2 МБ не читаем: подсчёт строк по ним слишком долгий.
+                        // 999999 — маркер «огромный файл» для фронтенда.
+                        if size > 2 * 1024 * 1024 {
+                            files.push(FileInfo { name, lines: 999999 });
+                            continue;
+                        }
                         let mut lines = 0;
                         if let Ok(file) = fs::File::open(entry.path()) {
                             let reader = BufReader::new(file);
@@ -556,6 +563,12 @@ fn consolidate_subdomains(content: String) -> Result<(String, usize), String> {
         }
 
         let (prefix, body, suffix) = split_zapret_line(line);
+        // '^' — строгий якорь: только этот домен, без поддоменов.
+        // Сжатие ^dns.nextdns.io до ^nextdns.io сломало бы правило, поэтому не трогаем.
+        if prefix.contains('^') {
+            if seen.insert(line.to_lowercase()) { out.push(line.to_string()); }
+            continue;
+        }
         let body_lower = body.trim().to_lowercase();
         let is_ip = body_lower.contains('/') || std::net::IpAddr::from_str(&body_lower).is_ok();
         // Не трогаем всё, что не похоже на обычный домен (wildcard, порт, мусор).

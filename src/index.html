@@ -842,16 +842,18 @@
     setAutostartUI(autoStart);
 
     const config = await invoke('get_config');
-    if (config.root_path) {
-      state.rootPath = config.root_path;
-      $id('rootStatus').textContent = state.rootPath;
-      $id('rootBar').classList.add('connected');
-      $id('quickActions').style.display = 'flex';
-      $id('connectRootLabel').textContent = 'Сменить папку';
-      $id('filterBar').style.display = 'flex';
+    if (!config.root_path) return;
 
-      await scanVersions(config.active_version);
+    state.rootPath = config.root_path;
+    $id('rootStatus').textContent = state.rootPath;
+    $id('rootBar').classList.add('connected');
+    $id('quickActions').style.display = 'flex';
+    $id('connectRootLabel').textContent = 'Сменить папку';
+    $id('filterBar').style.display = 'flex';
 
+    // Окно уже отрисовано: тяжёлые операции (скан версий, поиск winws.exe)
+    // выполняем в фоне, не блокируя интерфейс.
+    scanVersions(config.active_version).then(async () => {
       state.runningWinwsPath = await invoke('find_running_winws');
       if (state.runningWinwsPath && state.runningWinwsPath.toLowerCase().includes('\\bin\\winws.exe')) {
         let rootDir = state.runningWinwsPath.substring(0, state.runningWinwsPath.lastIndexOf('\\'));
@@ -871,7 +873,7 @@
       } else {
         $id('runningStatus').innerHTML = '<span class="status-dot"></span>winws.exe не запущен';
       }
-    }
+    }).catch(e => showToast('Ошибка инициализации: ' + e, 'error'));
   })();
 
   $id('btnAutostart').onclick = async () => {
@@ -901,7 +903,7 @@
       const text = String(err && err.message ? err.message : err);
       // Плагин не отдаёт HTTP-код: 403/404 приватного репозитория он превращает
       // в «Could not fetch a valid release JSON from the remote» (ReleaseNotFound).
-      const isPrivate = /\b(403|404)\b|forbidden|not found|private|unauthorized|authentication|release json|releasenotfound/i.test(text);
+      const isPrivate = /could not fetch a valid release json|releasenotfound|\b(403|404)\b|forbidden|not found|private|unauthorized|authentication/i.test(text);
       showToast(
         isPrivate
           ? 'Не удалось проверить обновления: репозиторий приватный'
@@ -1032,7 +1034,7 @@
         const isU = f.name.includes('-user');
         return `<button class="file-btn ${f.name === state.currentListFile ? 'active' : ''} ${isU ? 'user-file' : ''}" data-file="${escapeHtml(f.name)}">
         <span class="file-name">${escapeHtml(f.name)}</span>
-        <span class="line-count">${f.lines}</span>
+        <span class="line-count">${f.lines === 999999 ? '...' : f.lines}</span>
       </button>`;
       }).join('');
 
@@ -1226,10 +1228,27 @@
     const query = $id('searchInput').value.trim();
     const index = searchMatches[currentMatchIndex];
 
-    // Нативное выделение: браузер сам проскроллит к фрагменту.
+    if (index === undefined || index < 0) return;
+
     textarea.focus();
     textarea.setSelectionRange(index, index + query.length);
-    // Синхронизация номеров произойдёт через обработчик 'scroll' на textarea.
+
+    // Принудительный скролл (нативный в WebView2 иногда ломается на больших файлах)
+    const style = window.getComputedStyle(textarea);
+    let lineHeight = parseFloat(style.lineHeight);
+    if (isNaN(lineHeight)) lineHeight = parseFloat(style.fontSize) * 1.5;
+    const paddingTop = parseFloat(style.paddingTop) || 0;
+
+    const textBefore = textarea.value.substring(0, index);
+    let linesBefore = 0;
+    for (let i = 0; i < textBefore.length; i++) {
+      if (textBefore.charCodeAt(i) === 10) linesBefore++;
+    }
+
+    const targetScroll = (linesBefore * lineHeight) + paddingTop - (textarea.clientHeight / 2) + (lineHeight / 2);
+
+    textarea.scrollTop = Math.max(0, targetScroll);
+    $id('lineNumbers').scrollTop = textarea.scrollTop;
   }
 
   $id('fileLog').addEventListener('click', (e) => {

@@ -243,6 +243,8 @@
     .field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
     .field-label { font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); }
     .switcher-body { display: flex; flex-direction: column; gap: 16px; }
+    .switcher-head-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .exception-empty { padding: 10px 8px; color: var(--text-3); font: 400 12px/18px var(--font-ui); }
     .radio-group { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-height: 34px; }
     .radio { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); cursor: pointer; }
     .radio input { position: absolute; width: 0; height: 0; opacity: 0; }
@@ -252,6 +254,20 @@
     .radio input:focus-visible + .radio-dot { outline: 2px solid var(--accent); outline-offset: 2px; }
     .inline-field { display: flex; gap: 8px; }
     .inline-field .input { flex: 1; min-width: 0; }
+    .inline-field.actions-wrap { flex-wrap: wrap; }
+    .inline-field.actions-wrap .btn { flex: none; }
+    .process-picker { display: flex; flex-direction: column; gap: 8px; padding: 8px; background: var(--input); border: 1px solid var(--line); border-radius: var(--radius); }
+    .process-picker[hidden] { display: none; }
+    .process-picker-search { display: flex; align-items: center; gap: 8px; padding: 0 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+    .process-picker-search .icon { flex: none; color: var(--text-3); }
+    .process-picker-search .input { flex: 1; min-width: 0; padding-left: 0; background: transparent; border: 0; }
+    .process-list { display: flex; flex-direction: column; gap: 1px; max-height: 220px; overflow: auto; }
+    .process-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 30px; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text-2); font: 400 12px/16px var(--font-mono); text-align: left; cursor: pointer; }
+    .process-item:hover { background: var(--surface-hover); color: var(--text); }
+    .process-item:disabled { opacity: 0.45; cursor: default; }
+    .process-item:disabled:hover { background: transparent; color: var(--text-2); }
+    .process-item > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .process-added { flex: none; font: 400 10px/1 var(--font-ui); color: var(--text-3); }
     .exception-list { display: flex; flex-direction: column; gap: 1px; padding: 4px; background: var(--input); border: 1px solid var(--line); border-radius: var(--radius); }
     .exception-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0 4px 0 8px; border-radius: 5px; font: 400 12px/16px var(--font-mono); color: var(--text-2); }
     .exception-row:hover { background: var(--surface-raised); }
@@ -270,6 +286,8 @@
     .toast-error { border-left-color: var(--danger); }
     .toast-error::before { background: var(--danger); }
     .toast.is-leaving { animation: toast-out 160ms var(--ease) forwards; }
+    .toast-action { margin-left: auto; align-self: center; flex: none; height: 24px; padding: 0 8px; background: transparent; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); color: var(--accent); font: 500 12px/1 var(--font-ui); cursor: pointer; transition: border-color 140ms var(--ease), background 140ms var(--ease); }
+    .toast-action:hover { border-color: var(--accent); background: rgba(203, 166, 247, 0.08); }
 
     /* Modal */
     .modal { position: fixed; inset: 0; z-index: 1000; display: none; place-items: center; padding: 24px; background: rgba(4, 6, 10, 0.72); backdrop-filter: blur(3px); }
@@ -633,23 +651,23 @@
       <div class="panel-head">
         <div>
           <h2 class="section-title">Свитчер раскладки</h2>
-          <p class="section-desc">Переключение русской и английской раскладки по горячей клавише</p>
+          <p class="section-desc">Автоматическое исправление слов, набранных не в той раскладке</p>
         </div>
-        <span class="vbadge muted">Не подключено</span>
+        <div class="switcher-head-actions">
+          <span class="vbadge muted" id="switcherStatusBadge">Выключен</span>
+          <label class="switch">
+            <input type="checkbox" id="switcherEnabled">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            <span id="switcherEnabledLabel">Выключен</span>
+          </label>
+        </div>
       </div>
 
       <div class="switcher-body">
         <div class="form-grid">
           <div class="field">
-            <label class="field-label" for="switcherHotkey">Сочетание клавиш</label>
-            <div class="select-wrap">
-              <select id="switcherHotkey" disabled>
-                <option>Ctrl + Shift</option>
-                <option>Alt + Shift</option>
-                <option>Caps Lock</option>
-              </select>
-              <svg class="icon select-chevron"><use href="#i-chevron-down"></use></svg>
-            </div>
+            <span class="field-label">Ручное переключение</span>
+            <p class="hint" style="margin:0;">Системное сочетание Windows (Alt + Shift или Win + Space). Свитчер его не перехватывает.</p>
           </div>
 
           <div class="field">
@@ -658,17 +676,12 @@
               <label class="radio">
                 <input type="radio" name="switcherMode" checked disabled>
                 <span class="radio-dot"></span>
-                По сочетанию
+                Авто по словарю
               </label>
               <label class="radio">
                 <input type="radio" name="switcherMode" disabled>
                 <span class="radio-dot"></span>
-                По одной клавише
-              </label>
-              <label class="radio">
-                <input type="radio" name="switcherMode" disabled>
-                <span class="radio-dot"></span>
-                Выключено
+                Плюс ручное сочетание
               </label>
             </div>
           </div>
@@ -676,33 +689,44 @@
 
         <div class="field">
           <label class="field-label" for="switcherException">Исключения</label>
-          <div class="inline-field">
-            <input class="input" type="text" id="switcherException" placeholder="Имя процесса или окна" disabled>
-            <button class="btn btn-secondary" type="button" disabled>
+          <div class="inline-field actions-wrap">
+            <input class="input" type="text" id="switcherException" placeholder="Имя процесса, например cs2.exe">
+            <button class="btn btn-secondary" type="button" id="switcherAddException">
+              <svg class="icon"><use href="#i-plus"></use></svg>
+              Добавить
+            </button>
+            <button class="btn btn-secondary" type="button" id="switcherPickProcess" aria-expanded="false">
+              <svg class="icon"><use href="#i-list"></use></svg>
+              Выбрать из списка
+            </button>
+          </div>
+          <div class="process-picker" id="switcherProcessPicker" hidden>
+            <div class="process-picker-search">
+              <svg class="icon"><use href="#i-search"></use></svg>
+              <input class="input" type="text" id="switcherProcessFilter" placeholder="Поиск процесса..." autocomplete="off">
+            </div>
+            <div class="process-list" id="switcherProcessList"></div>
+          </div>
+          <div class="exception-list" id="switcherExceptions"></div>
+          <p class="hint">Double Shift конвертирует последнее слово или выделенный текст. В приложениях из списка свитчер не работает.</p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="switcherWordException">Слова-исключения</label>
+          <div class="inline-field actions-wrap">
+            <input class="input" type="text" id="switcherWordException" placeholder="Слово, которое не нужно исправлять">
+            <button class="btn btn-secondary" type="button" id="switcherAddWordException">
               <svg class="icon"><use href="#i-plus"></use></svg>
               Добавить
             </button>
           </div>
-          <div class="exception-list">
-            <div class="exception-row">
-              <span>Discord.exe</span>
-              <button class="icon-btn" type="button" aria-label="Удалить исключение" disabled>
-                <svg class="icon"><use href="#i-x"></use></svg>
-              </button>
-            </div>
-            <div class="exception-row">
-              <span>Telegram.exe</span>
-              <button class="icon-btn" type="button" aria-label="Удалить исключение" disabled>
-                <svg class="icon"><use href="#i-x"></use></svg>
-              </button>
-            </div>
-          </div>
-          <p class="hint">В этих приложениях свитчер не меняет раскладку</p>
+          <div class="exception-list" id="switcherWordExceptions"></div>
+          <p class="hint">Эти слова свитчер не исправляет. Если автозамена ошиблась, нажмите Backspace дважды сразу после неё — появится предложение добавить слово сюда.</p>
         </div>
 
         <div class="notice">
           <svg class="icon"><use href="#i-alert"></use></svg>
-          <span>В этой сборке нет команд свитчера. Верстка подготовлена, но настройки не применяются к системе.</span>
+          <span id="switcherNotice">Свитчер выключен. Включите его, чтобы слова, набранные не в той раскладке, исправлялись автоматически.</span>
         </div>
       </div>
     </div>
@@ -740,7 +764,7 @@
     el.scrollTop = el.scrollHeight;
   }
 
-  function showToast(message, type = 'info') {
+  function showToast(message, type = 'info', options = null) {
     const host = $id('toastContainer');
     if (!host) return;
     const toast = document.createElement('div');
@@ -748,9 +772,23 @@
     toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
     toast.textContent = String(message);
     toast.addEventListener('click', () => dismissToast(toast));
+
+    if (options?.actionLabel && typeof options.onAction === 'function') {
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.className = 'toast-action';
+      action.textContent = options.actionLabel;
+      action.addEventListener('click', (event) => {
+        event.stopPropagation();
+        dismissToast(toast);
+        options.onAction();
+      });
+      toast.appendChild(action);
+    }
+
     host.appendChild(toast);
     while (host.children.length > 4) host.firstElementChild.remove();
-    setTimeout(() => dismissToast(toast), 4200);
+    setTimeout(() => dismissToast(toast), options?.timeout ?? 4200);
   }
 
   function dismissToast(toast) {
@@ -829,7 +867,7 @@
 
   restoreWindowGeometry().then(watchWindowGeometry);
 
-  let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null, trashFiles: [] };
+  let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null, trashFiles: [], switcherEnabled: false, switcherExclusions: [], switcherWordExclusions: [], switcherDictionariesReady: false, switcherAdmin: true, switcherAdminWarned: false, switcherEventsBound: false, switcherProcesses: [] };
 
   function setAutostartUI(on) {
     $id('btnAutostartLabel').textContent = on ? 'Автозапуск: вкл' : 'Автозапуск: выкл';
@@ -842,6 +880,12 @@
     setAutostartUI(autoStart);
 
     const config = await invoke('get_config');
+
+    // Свитчер раскладки не зависит от папки Zapret — запускаем сразу.
+    // Ждём загрузку его настроек, чтобы последующие save_config
+    // не записали в файл значения по умолчанию.
+    await initSwitcher();
+
     if (!config.root_path) return;
 
     state.rootPath = config.root_path;
@@ -863,7 +907,7 @@
           state.activeVersion = runningVersion;
           $id('activeVersionBadge').style.display = '';
           $id('activeVersionText').textContent = state.activeVersion.name + ' · запущена';
-          await invoke('save_config', { config: { root_path: state.rootPath, active_version: state.activeVersion.name } });
+          await persistConfig();
           loadListsTab();
         }
       }
@@ -948,7 +992,7 @@
       $id('activeVersionBadge').style.display = '';
       $id('activeVersionText').textContent = state.activeVersion.name;
       $id('listsContent').style.display = 'flex';
-      await invoke('save_config', { config: { root_path: state.rootPath, active_version: state.activeVersion.name } });
+      await persistConfig();
 
       const gameStatus = await invoke('get_game_filter_status', { versionPath: state.activeVersion.path });
       const ipsetStatus = await invoke('get_ipset_filter_status', { versionPath: state.activeVersion.path });
@@ -1498,6 +1542,371 @@
       }
     };
   }
+
+  // --- Свитчер раскладки (бэкенд в lib.rs) ---
+
+  function renderSwitcher() {
+    const toggle = $id('switcherEnabled');
+    if (toggle) toggle.checked = state.switcherEnabled;
+
+    const enabledLabel = $id('switcherEnabledLabel');
+    if (enabledLabel) enabledLabel.textContent = state.switcherEnabled ? 'Включён' : 'Выключен';
+
+    const badge = $id('switcherStatusBadge');
+    if (badge) {
+      badge.textContent = state.switcherEnabled ? 'Активен' : 'Выключен';
+      badge.classList.toggle('muted', !state.switcherEnabled);
+    }
+
+    const notice = $id('switcherNotice');
+    if (notice) {
+      if (!state.switcherEnabled) {
+        notice.textContent = 'Свитчер выключен. Включите его, чтобы слова, набранные не в той раскладке, исправлялись автоматически.';
+      } else if (!state.switcherDictionariesReady) {
+        notice.textContent = 'Свитчер включён, но словари ещё загружаются. Исправление заработает через несколько секунд.';
+      } else {
+        notice.textContent = 'Свитчер активен: слова проверяются по словарю и исправляются автоматически. Double Shift конвертирует последнее слово или выделенный текст. Приложения и слова из списков исключений игнорируются.';
+      }
+    }
+
+    const list = $id('switcherExceptions');
+    if (list) {
+      list.innerHTML = state.switcherExclusions.length === 0
+        ? '<div class="exception-empty">Исключений нет</div>'
+        : state.switcherExclusions.map((name, index) => `
+      <div class="exception-row">
+        <span>${escapeHtml(name)}</span>
+        <button class="icon-btn" type="button" data-remove-exclusion="${index}" aria-label="Удалить исключение">
+          <svg class="icon"><use href="#i-x"></use></svg>
+        </button>
+      </div>`).join('');
+    }
+
+    const wordList = $id('switcherWordExceptions');
+    if (wordList) {
+      wordList.innerHTML = state.switcherWordExclusions.length === 0
+        ? '<div class="exception-empty">Слов-исключений нет</div>'
+        : state.switcherWordExclusions.map((word, index) => `
+      <div class="exception-row">
+        <span>${escapeHtml(word)}</span>
+        <button class="icon-btn" type="button" data-remove-word="${index}" aria-label="Удалить слово-исключение">
+          <svg class="icon"><use href="#i-x"></use></svg>
+        </button>
+      </div>`).join('');
+    }
+  }
+
+  // Полный объект конфига: save_config перезаписывает файл целиком,
+  // поэтому в каждом вызове должны быть и настройки свитчера.
+  function configPayload() {
+    return {
+      root_path: state.rootPath,
+      active_version: state.activeVersion ? state.activeVersion.name : null,
+      switcher_enabled: state.switcherEnabled,
+      switcher_exclusions: state.switcherExclusions.slice(),
+      switcher_word_exclusions: state.switcherWordExclusions.slice()
+    };
+  }
+
+  async function persistConfig() {
+    try {
+      await invoke('save_config', { config: configPayload() });
+    } catch (e) {
+      showToast('Не удалось сохранить настройки: ' + e, 'error');
+    }
+  }
+
+  async function applySwitcherConfig() {
+    try {
+      await invoke('update_switcher_config', {
+        enabled: state.switcherEnabled,
+        exclusions: state.switcherExclusions
+      });
+      // Настройки свитчера живут в памяти хука, но должны пережить перезапуск.
+      await persistConfig();
+    } catch (e) {
+      showToast('Не удалось применить настройки свитчера: ' + e, 'error');
+    }
+  }
+
+  function warnSwitcherAdmin(message) {
+    if (state.switcherAdminWarned) return;
+    state.switcherAdminWarned = true;
+    showToast(
+      message || 'Свитчер запущен без прав администратора: в окнах, запущенных от имени администратора, перехват клавиатуры может не работать.',
+      'info'
+    );
+  }
+
+  function bindSwitcherEvents() {
+    if (state.switcherEventsBound) return;
+    const tauriEvent = window.__TAURI__?.event;
+    if (!tauriEvent?.listen) return;
+    state.switcherEventsBound = true;
+
+    tauriEvent.listen('switcher-error', (event) => {
+      showToast(String(event.payload), 'error');
+    });
+    tauriEvent.listen('switcher-warning', (event) => {
+      warnSwitcherAdmin(event?.payload ? String(event.payload) : undefined);
+    });
+    tauriEvent.listen('switcher-dictionaries-ready', () => {
+      state.switcherDictionariesReady = true;
+      renderSwitcher();
+    });
+    tauriEvent.listen('switcher-suggest-exclusion', (event) => {
+      const word = String(event?.payload || '').trim();
+      if (!word) return;
+      showToast(`Слово «${word}» исправлено неверно.`, 'info', {
+        actionLabel: 'В исключения',
+        timeout: 8000,
+        onAction: async () => {
+          if (await addSwitcherWordExclusion(word)) {
+            showToast(`Слово «${word}» больше не будет исправляться.`, 'success');
+          }
+        }
+      });
+    });
+  }
+
+  async function initSwitcher() {
+    renderSwitcher();
+    bindSwitcherEvents();
+    try {
+      await invoke('start_switcher_listener');
+      // Состояние хука бэкенд уже восстановил из config.json при старте;
+      // get_config нужен, чтобы UI показывал ровно то, что сохранено на диске.
+      const [config, cfg] = await Promise.all([
+        invoke('get_config'),
+        invoke('get_switcher_config')
+      ]);
+      if (config) {
+        state.switcherEnabled = !!config.switcher_enabled;
+        state.switcherExclusions = Array.isArray(config.switcher_exclusions)
+          ? config.switcher_exclusions.slice()
+          : [];
+        state.switcherWordExclusions = Array.isArray(config.switcher_word_exclusions)
+          ? config.switcher_word_exclusions.slice()
+          : [];
+      }
+      if (cfg) {
+        state.switcherDictionariesReady = !!cfg.dictionaries_ready;
+        state.switcherAdmin = cfg.admin !== false;
+      }
+      renderSwitcher();
+      if (!state.switcherAdmin) warnSwitcherAdmin();
+
+      if (!state.switcherDictionariesReady) {
+        // Если событие о готовности словарей потерялось (или загрузка не удалась),
+        // через 15 секунд перепроверяем состояние на бэкенде.
+        setTimeout(async () => {
+          if (state.switcherDictionariesReady) return;
+          try {
+            const cfg = await invoke('get_switcher_config');
+            if (cfg && cfg.dictionaries_ready) {
+              state.switcherDictionariesReady = true;
+              renderSwitcher();
+            } else {
+              showToast('Словари свитчера не загружены. Проверьте подключение к интернету.', 'error');
+            }
+          } catch (_) {}
+        }, 15000);
+      }
+    } catch (e) {
+      showToast('Свитчер недоступен: ' + e, 'error');
+    }
+  }
+
+  $id('switcherEnabled').onchange = async (e) => {
+    state.switcherEnabled = e.target.checked;
+    renderSwitcher();
+    await applySwitcherConfig();
+    showToast(
+      state.switcherEnabled
+        ? 'Свитчер включён: слова будут исправляться по словарю.'
+        : 'Свитчер выключен.',
+      state.switcherEnabled ? 'success' : 'info'
+    );
+  };
+
+  async function addSwitcherExclusionValue(rawValue) {
+    const value = String(rawValue || '').trim();
+    if (!value) return false;
+
+    const lower = value.toLowerCase();
+    const lowerNoExt = lower.replace(/\.exe$/i, '');
+    const exists = state.switcherExclusions.some(ex => {
+      const current = ex.toLowerCase();
+      return current === lower || current.replace(/\.exe$/i, '') === lowerNoExt;
+    });
+    if (exists) {
+      showToast('Такое исключение уже добавлено.', 'info');
+      return false;
+    }
+
+    state.switcherExclusions.push(value);
+    renderSwitcher();
+    if (!$id('switcherProcessPicker')?.hidden) renderProcessList();
+    await applySwitcherConfig();
+    return true;
+  }
+
+  async function addSwitcherExclusion() {
+    const input = $id('switcherException');
+    const value = input.value.trim();
+    if (!value) return;
+    if (await addSwitcherExclusionValue(value)) input.value = '';
+  }
+
+  /// Добавляет слово в список «не исправлять» (бэкенд дедуплицирует сам).
+  async function addSwitcherWordExclusion(rawValue) {
+    const word = String(rawValue || '').trim();
+    if (!word) return false;
+    try {
+      const updated = await invoke('add_switcher_word_exclusion', { word });
+      state.switcherWordExclusions = Array.isArray(updated) ? updated : state.switcherWordExclusions;
+      renderSwitcher();
+      await persistConfig();
+      return true;
+    } catch (e) {
+      showToast('Не удалось добавить слово-исключение: ' + e, 'error');
+      return false;
+    }
+  }
+
+  async function removeSwitcherWordExclusion(word) {
+    try {
+      const updated = await invoke('remove_switcher_word_exclusion', { word });
+      state.switcherWordExclusions = Array.isArray(updated) ? updated : state.switcherWordExclusions;
+      renderSwitcher();
+      await persistConfig();
+    } catch (e) {
+      showToast('Не удалось удалить слово-исключение: ' + e, 'error');
+    }
+  }
+
+  function closeProcessPicker() {
+    const picker = $id('switcherProcessPicker');
+    if (picker) picker.hidden = true;
+    $id('switcherPickProcess')?.setAttribute('aria-expanded', 'false');
+  }
+
+  function renderProcessList() {
+    const listEl = $id('switcherProcessList');
+    if (!listEl) return;
+
+    const query = ($id('switcherProcessFilter')?.value || '').trim().toLowerCase();
+    const items = state.switcherProcesses
+      .filter(name => !query || name.toLowerCase().includes(query))
+      .slice(0, 300);
+
+    if (items.length === 0) {
+      listEl.innerHTML = '<div class="exception-empty">Ничего не найдено</div>';
+      return;
+    }
+
+    const existing = new Set();
+    for (const ex of state.switcherExclusions) {
+      const lower = ex.toLowerCase();
+      existing.add(lower);
+      existing.add(lower.replace(/\.exe$/i, ''));
+    }
+
+    listEl.innerHTML = items.map(name => {
+      const lower = name.toLowerCase();
+      const added = existing.has(lower) || existing.has(lower.replace(/\.exe$/i, ''));
+      return `<button class="process-item" type="button" data-process-name="${escapeHtml(name)}" ${added ? 'disabled' : ''}>
+        <span>${escapeHtml(name)}</span>
+        ${added ? '<span class="process-added">уже в списке</span>' : ''}
+      </button>`;
+    }).join('');
+  }
+
+  async function toggleProcessPicker() {
+    const picker = $id('switcherProcessPicker');
+    const button = $id('switcherPickProcess');
+    if (!picker || !button) return;
+
+    if (!picker.hidden) {
+      closeProcessPicker();
+      return;
+    }
+
+    picker.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+
+    const listEl = $id('switcherProcessList');
+    if (listEl) listEl.innerHTML = '<div class="exception-empty">Загрузка списка процессов...</div>';
+
+    try {
+      // Обновляем список при каждом открытии — игры и лаунчеры
+      // могли запуститься уже после старта приложения.
+      state.switcherProcesses = await invoke('get_running_processes');
+      renderProcessList();
+      $id('switcherProcessFilter')?.focus();
+    } catch (e) {
+      if (listEl) {
+        listEl.innerHTML = '<div class="exception-empty error-text">Не удалось получить список процессов</div>';
+      }
+    }
+  }
+
+  $id('switcherAddException').onclick = addSwitcherExclusion;
+  $id('switcherException').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addSwitcherExclusion(); }
+  });
+
+  $id('switcherPickProcess').onclick = (e) => {
+    e.stopPropagation();
+    toggleProcessPicker();
+  };
+  $id('switcherProcessFilter').addEventListener('input', renderProcessList);
+  $id('switcherProcessFilter').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeProcessPicker();
+  });
+  $id('switcherProcessList').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-process-name]');
+    if (!btn || btn.disabled) return;
+    if (await addSwitcherExclusionValue(btn.dataset.processName)) closeProcessPicker();
+  });
+  document.addEventListener('click', (e) => {
+    const picker = $id('switcherProcessPicker');
+    if (!picker || picker.hidden) return;
+    if (!e.target.closest('#switcherProcessPicker') && !e.target.closest('#switcherPickProcess')) {
+      closeProcessPicker();
+    }
+  });
+
+  $id('switcherExceptions').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-remove-exclusion]');
+    if (!btn) return;
+    const index = Number(btn.dataset.removeExclusion);
+    if (!Number.isInteger(index) || index < 0) return;
+    state.switcherExclusions.splice(index, 1);
+    renderSwitcher();
+    await applySwitcherConfig();
+  });
+
+  $id('switcherAddWordException').onclick = async () => {
+    const input = $id('switcherWordException');
+    const word = input.value.trim();
+    if (!word) return;
+    if (await addSwitcherWordExclusion(word)) input.value = '';
+  };
+  $id('switcherWordException').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $id('switcherAddWordException').click();
+    }
+  });
+  $id('switcherWordExceptions').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-remove-word]');
+    if (!btn) return;
+    const index = Number(btn.dataset.removeWord);
+    if (!Number.isInteger(index) || index < 0) return;
+    const word = state.switcherWordExclusions[index];
+    if (word) await removeSwitcherWordExclusion(word);
+  });
 
   document.querySelectorAll('.tab').forEach(tab => {
     tab.onclick = () => {

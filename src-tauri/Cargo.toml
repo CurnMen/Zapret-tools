@@ -26,3 +26,14 @@ tokio = { version = "1", features = ["full"] }
 regex = "1"
 idna = "1"
 psl = "2"
+rdev = "0.5"
+enigo = "0.3"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+] }

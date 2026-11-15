@@ -30,7 +30,7 @@ pub struct TrashItem {
     pub deleted_lines: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub root_path: Option<String>,
@@ -44,6 +44,29 @@ pub struct Config {
     /// Слова, которые свитчер не должен исправлять автоматически.
     #[serde(default)]
     pub switcher_word_exclusions: Vec<String>,
+    /// Автопроверка обновлений самой программы при старте.
+    /// У старых конфигов поля нет — тогда считаем, что проверка включена.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// `Default` руками: вывод `#[derive(Default)]` дал бы auto_check_updates = false,
+// а по умолчанию автопроверка должна быть включена.
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            root_path: None,
+            active_version: None,
+            switcher_enabled: false,
+            switcher_exclusions: Vec::new(),
+            switcher_word_exclusions: Vec::new(),
+            auto_check_updates: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -776,48 +799,267 @@ fn create_start_menu_shortcut() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn toggle_game_filter(version_path: String, enable: bool) -> Result<(), String> {
-    let utils_dir = Path::new(&version_path).join("utils");
-    if !utils_dir.exists() { fs::create_dir_all(&utils_dir).map_err(|e| e.to_string())?; }
-    let flag_file = utils_dir.join("game_filter.enabled");
-    if enable { fs::write(flag_file, "ENABLED").map_err(|e| e.to_string())?; }
-    else { if flag_file.exists() { fs::remove_file(flag_file).map_err(|e| e.to_string())?; } }
+/// Порты Game Filter по умолчанию — те же, что в service.bat сборки Flowseal.
+const GAME_FILTER_DEFAULT_PORTS: &str = "1024-65535";
+
+fn game_filter_defaults() -> (String, String, String) {
+    (
+        "all".to_string(),
+        GAME_FILTER_DEFAULT_PORTS.to_string(),
+        GAME_FILTER_DEFAULT_PORTS.to_string(),
+    )
+}
+
+/// Проверяет диапазон портов в формате service.bat:
+/// `1024-65535`, `443`, `80,443,1000-2000`.
+///
+/// Пустая строка и мусор не принимаются: service.bat читает этот файл
+/// без проверок, и опечатка в портах ломает запуск службы.
+fn validate_port_range(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Диапазон портов не может быть пустым.".to_string());
+    }
+
+    for part in trimmed.split(',') {
+        let token = part.trim();
+        if token.is_empty() {
+            return Err(format!("Пустой элемент в списке портов: «{trimmed}»"));
+        }
+        let (start, end) = match token.split_once('-') {
+            Some((a, b)) => (a.trim(), b.trim()),
+            None => (token, token),
+        };
+        let start_port = parse_port(start, trimmed)?;
+        let end_port = parse_port(end, trimmed)?;
+        if start_port > end_port {
+            return Err(format!("Начало диапазона больше конца: «{token}»"));
+        }
+    }
     Ok(())
+}
+
+fn parse_port(value: &str, context: &str) -> Result<u16, String> {
+    // u16 сам отсекает всё больше 65535.
+    let port: u16 = value
+        .parse()
+        .map_err(|_| format!("Некорректный порт «{value}» в «{context}»"))?;
+    if port == 0 {
+        return Err(format!("Порт 0 недопустим в «{context}»"));
+    }
+    Ok(port)
+}
+
+/// Читает `utils/game_filter.enabled` в формате service.bat:
+/// ```text
+/// mode=all
+/// tcp=1024-65535
+/// udp=1024-65535
+/// ```
+/// Возвращает (включён, режим, tcp, udp). Файла нет — фильтр выключен,
+/// а в UI подставляются значения по умолчанию.
+fn read_game_filter_config(version_path: &str) -> (bool, String, String, String) {
+    let flag_file = Path::new(version_path).join("utils").join("game_filter.enabled");
+    let (default_mode, default_tcp, default_udp) = game_filter_defaults();
+
+    let Ok(content) = fs::read_to_string(&flag_file) else {
+        return (false, default_mode, default_tcp, default_udp);
+    };
+
+    let mut mode = default_mode;
+    let mut tcp = default_tcp;
+    let mut udp = default_udp;
+
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim().to_ascii_lowercase().as_str() {
+            "mode" => mode = value.to_string(),
+            "tcp" => tcp = value.to_string(),
+            "udp" => udp = value.to_string(),
+            _ => {}
+        }
+    }
+
+    // Старая заглушка ("ENABLED") ключей не содержит: остаются значения
+    // по умолчанию, но фильтр при этом считается включённым.
+    (true, mode, tcp, udp)
+}
+
+#[tauri::command]
+fn toggle_game_filter(
+    version_path: String,
+    enabled: bool,
+    mode: Option<String>,
+    tcp_range: Option<String>,
+    udp_range: Option<String>,
+) -> Result<(), String> {
+    let utils_dir = Path::new(&version_path).join("utils");
+    let flag_file = utils_dir.join("game_filter.enabled");
+
+    // Выключение = удалить файл: без него service.bat фильтр не применяет.
+    if !enabled {
+        if flag_file.exists() {
+            fs::remove_file(&flag_file).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+
+    // Аргументы не передали (старый вызов) — берём то, что уже в файле.
+    let (_, file_mode, file_tcp, file_udp) = read_game_filter_config(&version_path);
+    let mode = mode.unwrap_or(file_mode).trim().to_ascii_lowercase();
+    let mode = match mode.as_str() {
+        "all" | "tcp" | "udp" => mode,
+        other => {
+            return Err(format!(
+                "Неизвестный режим фильтра: «{other}». Допустимо: all, tcp, udp."
+            ))
+        }
+    };
+    let tcp_range = tcp_range.unwrap_or(file_tcp);
+    let udp_range = udp_range.unwrap_or(file_udp);
+
+    validate_port_range(&tcp_range)?;
+    validate_port_range(&udp_range)?;
+
+    fs::create_dir_all(&utils_dir).map_err(|e| e.to_string())?;
+
+    // Ровно тот текст, который разбирает service.bat.
+    let content = format!(
+        "mode={}\ntcp={}\nudp={}\n",
+        mode,
+        tcp_range.trim(),
+        udp_range.trim()
+    );
+    fs::write(&flag_file, content).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_game_filter_status(version_path: String) -> bool {
-    Path::new(&version_path).join("utils").join("game_filter.enabled").exists()
+    read_game_filter_config(&version_path).0
 }
 
 #[tauri::command]
-fn toggle_ipset_filter(version_path: String, enable: bool) -> Result<(), String> {
-    let lists_dir = Path::new(&version_path).join("lists");
-    let list_file = lists_dir.join("ipset-all.txt");
-    let backup_file = lists_dir.join("ipset-all.txt.backup");
+fn get_game_filter_config(version_path: String) -> (bool, String, String, String) {
+    read_game_filter_config(&version_path)
+}
 
-    if enable {
-        if backup_file.exists() {
-            if list_file.exists() { let _ = fs::remove_file(&list_file); }
-            fs::rename(&backup_file, &list_file).map_err(|e| e.to_string())?;
-        }
-    } else {
-        if list_file.exists() && !backup_file.exists() {
-            fs::rename(&list_file, &backup_file).map_err(|e| e.to_string())?;
-        }
-        fs::write(&list_file, "203.0.113.113/32\n").map_err(|e| e.to_string())?;
+/// Заглушка «выключенного» IPSet из service.bat.
+const IPSET_NONE_STUB: &str = "203.0.113.113/32";
+
+/// Пути списка IP и его бэкапа. Бэкап нужен, чтобы вернуться из `none`/`any`
+/// к рабочему списку: service.bat сам ничего не сохраняет.
+fn ipset_paths(version_path: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let lists_dir = Path::new(version_path).join("lists");
+    (
+        lists_dir.join("ipset-all.txt"),
+        lists_dir.join("ipset-all.txt.backup"),
+    )
+}
+
+/// Состояние IPSet по содержимому `lists/ipset-all.txt`:
+/// * `loaded` — нормальный список IP;
+/// * `none` — только заглушка `203.0.113.113/32`;
+/// * `any` — файл пустой (0 байт), service.bat не фильтрует ничего.
+#[tauri::command]
+fn get_ipset_state(version_path: String) -> String {
+    let (list_file, _) = ipset_paths(&version_path);
+    let Ok(content) = fs::read_to_string(&list_file) else {
+        // Файла нет — фильтровать нечего.
+        return "none".to_string();
+    };
+
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return "any".to_string();
     }
+
+    let mut lines = trimmed.lines().filter(|line| !line.trim().is_empty());
+    let first = lines.next().unwrap_or("").trim();
+    if first == IPSET_NONE_STUB && lines.next().is_none() {
+        return "none".to_string();
+    }
+
+    "loaded".to_string()
+}
+
+#[tauri::command]
+fn set_ipset_state(version_path: String, state: String) -> Result<(), String> {
+    let lists_dir = Path::new(&version_path).join("lists");
+    let (list_file, backup_file) = ipset_paths(&version_path);
+    fs::create_dir_all(&lists_dir).map_err(|e| e.to_string())?;
+
+    let current = get_ipset_state(version_path);
+    let state = state.trim().to_ascii_lowercase();
+
+    // Бэкап делаем один раз — при первом уходе из «загружен».
+    // Перезаписывать его нельзя: иначе Any → None затрёт рабочий список
+    // пустым файлом и вернуться к списку будет нечем.
+    let save_backup = || -> Result<(), String> {
+        if current == "loaded" && !backup_file.exists() && list_file.exists() {
+            fs::copy(&list_file, &backup_file).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    };
+
+    match state.as_str() {
+        "loaded" => {
+            // Восстанавливаем только если список сейчас не в рабочем виде,
+            // чтобы не затереть правки пользователя из бэкапа.
+            if current != "loaded" && backup_file.exists() {
+                if list_file.exists() {
+                    let _ = fs::remove_file(&list_file);
+                }
+                fs::rename(&backup_file, &list_file).map_err(|e| e.to_string())?;
+            }
+        }
+        "none" => {
+            save_backup()?;
+            fs::write(&list_file, format!("{IPSET_NONE_STUB}\n")).map_err(|e| e.to_string())?;
+        }
+        "any" => {
+            save_backup()?;
+            // Именно 0 байт: service.bat считает пустой список «все IP».
+            fs::write(&list_file, "").map_err(|e| e.to_string())?;
+        }
+        other => {
+            return Err(format!(
+                "Неизвестное состояние IPSet: «{other}». Допустимо: loaded, none, any."
+            ))
+        }
+    }
+
     Ok(())
 }
 
+/// Флаг `utils/check_updates.enabled` — проверка обновлений скриптов Zapret
+/// в service.bat. Скрипт смотрит только на существование файла.
 #[tauri::command]
-fn get_ipset_filter_status(version_path: String) -> bool {
-    let list_file = Path::new(&version_path).join("lists").join("ipset-all.txt");
-    if let Ok(content) = fs::read_to_string(list_file) {
-        return content.lines().filter(|l| !l.trim().is_empty()).count() > 1;
+fn toggle_zapret_update_check(version_path: String, enabled: bool) -> Result<(), String> {
+    let utils_dir = Path::new(&version_path).join("utils");
+    let flag_file = utils_dir.join("check_updates.enabled");
+
+    if enabled {
+        fs::create_dir_all(&utils_dir).map_err(|e| e.to_string())?;
+        // Значение не читается, но непустой файл видно в проводнике.
+        fs::write(&flag_file, "1\n").map_err(|e| e.to_string())
+    } else {
+        if flag_file.exists() {
+            fs::remove_file(&flag_file).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
-    false
+}
+
+#[tauri::command]
+fn get_zapret_update_check_status(version_path: String) -> bool {
+    Path::new(&version_path)
+        .join("utils")
+        .join("check_updates.enabled")
+        .exists()
 }
 
 #[tauri::command]
@@ -1600,11 +1842,15 @@ fn is_cyrillic_word(word: &str) -> bool {
     !word.is_empty() && word.chars().all(|c| matches!(c, 'а'..='я' | 'ё' | 'А'..='Я' | 'Ё'))
 }
 
-/// Знаки препинания, которые в ЙЦУКЕН стоят на буквенных клавишах:
-/// `.` → `ю`, `,` → `б`, `[` → `х`, `]` → `ъ`, `;` → `ж`, `'` → `э`, `` ` `` → `ё`.
-/// В английской раскладке они выглядят как пунктуация, поэтому слово `.,rf`
-/// должно считаться набранным не в той раскладке.
-const LATIN_KEYBOARD_PUNCTUATION: [char; 7] = ['[', ']', ';', '\'', ',', '.', '`'];
+/// Знаки, которые в английской раскладке могут оказаться частью слова:
+/// в ЙЦУКЕН на тех же клавишах стоят буквы или другие знаки
+/// (`.` → `ю`, `,` → `б`, `&` → `?`, `@` → `"` и т.д.).
+/// Пока такой символ не встретился, буфер слова не очищается, поэтому
+/// `.,rf` и `ghbdtn&` доживают до автозамены или Double Shift.
+const LATIN_KEYBOARD_PUNCTUATION: [char; 27] = [
+    '[', ']', ';', '\'', ',', '.', '`', '/', '&', '?', '@', '#', '$', '^', '*', '(', ')',
+    '_', '+', '{', '}', '|', '<', '>', '~', ':', '"',
+];
 
 fn is_latin_word(word: &str) -> bool {
     !word.is_empty()
@@ -1671,79 +1917,133 @@ fn convert_layout(word: &str, to_russian: bool) -> String {
 }
 
 fn en_char_to_ru(c: char) -> Option<char> {
+    // Буквы и знаки, которые не меняются от Shift: регистр сохраняем.
     let lower = c.to_ascii_lowercase();
-    let mapped = match lower {
+    let letter = match lower {
         'q' => 'й', 'w' => 'ц', 'e' => 'у', 'r' => 'к', 't' => 'е', 'y' => 'н',
         'u' => 'г', 'i' => 'ш', 'o' => 'щ', 'p' => 'з', '[' => 'х', ']' => 'ъ',
         'a' => 'ф', 's' => 'ы', 'd' => 'в', 'f' => 'а', 'g' => 'п', 'h' => 'р',
         'j' => 'о', 'k' => 'л', 'l' => 'д', ';' => 'ж', '\'' => 'э',
         'z' => 'я', 'x' => 'ч', 'c' => 'с', 'v' => 'м', 'b' => 'и', 'n' => 'т',
         'm' => 'ь', ',' => 'б', '.' => 'ю', '`' => 'ё',
+        _ => ' ',
+    };
+    if letter != ' ' {
+        return Some(if c.is_ascii_uppercase() {
+            letter.to_uppercase().next().unwrap_or(letter)
+        } else {
+            letter
+        });
+    }
+
+    // Shift-варианты тех же клавиш: в ЙЦУКЕН они дают другие буквы или знаки.
+    let mapped = match c {
+        '{' => 'Х', '}' => 'Ъ', ':' => 'Ж', '"' => 'Э',
+        '<' => 'Б', '>' => 'Ю', '~' => 'Ё',
+        '@' => '"', '#' => '№', '$' => ';', '^' => ':', '&' => '?',
+        '/' => '.', '?' => ',', '|' => '/',
         _ => return None,
     };
-    if c.is_ascii_uppercase() {
-        Some(mapped.to_uppercase().next().unwrap_or(mapped))
-    } else {
-        Some(mapped)
-    }
+    Some(mapped)
 }
 
 fn ru_char_to_en(c: char) -> Option<char> {
     let lower = c.to_lowercase().next().unwrap_or(c);
-    let mapped = match lower {
+    let letter = match lower {
         'й' => 'q', 'ц' => 'w', 'у' => 'e', 'к' => 'r', 'е' => 't', 'н' => 'y',
         'г' => 'u', 'ш' => 'i', 'щ' => 'o', 'з' => 'p', 'х' => '[', 'ъ' => ']',
         'ф' => 'a', 'ы' => 's', 'в' => 'd', 'а' => 'f', 'п' => 'g', 'р' => 'h',
         'о' => 'j', 'л' => 'k', 'д' => 'l', 'ж' => ';', 'э' => '\'',
         'я' => 'z', 'ч' => 'x', 'с' => 'c', 'м' => 'v', 'и' => 'b', 'т' => 'n',
         'ь' => 'm', 'б' => ',', 'ю' => '.', 'ё' => '`',
+        _ => ' ',
+    };
+    if letter != ' ' {
+        if c.is_uppercase() {
+            // Shift для этих букв даёт знак, а не заглавную: Х → `{`, Б → `<`.
+            return Some(match lower {
+                'х' => '{', 'ъ' => '}', 'ж' => ':', 'э' => '"',
+                'б' => '<', 'ю' => '>', 'ё' => '~',
+                _ => letter.to_ascii_uppercase(),
+            });
+        }
+        return Some(letter);
+    }
+
+    // Знаки, которые в ЙЦУКЕН стоят на Shift-клавишах.
+    let mapped = match c {
+        '№' => '#', ';' => '$', ':' => '^', '?' => '&', '"' => '@',
+        '/' => '|', '.' => '/', ',' => '?',
         _ => return None,
     };
-    if c.is_uppercase() {
-        Some(mapped.to_ascii_uppercase())
-    } else {
-        Some(mapped)
-    }
+    Some(mapped)
 }
 
 /// Физическая клавиша rdev -> символ с учётом активной раскладки.
-/// Возвращает None для цифр, пунктуации (кроме букв ЙЦУКЕН) и служебных клавиш.
+/// Возвращает None для цифр без Shift, клавиш без текста и служебных клавиш.
 fn key_to_char(key: rdev::Key, shift: bool, caps_lock: bool, russian: bool) -> Option<char> {
     use rdev::Key;
 
-    let en_lower = match key {
-        Key::KeyQ => 'q', Key::KeyW => 'w', Key::KeyE => 'e', Key::KeyR => 'r',
-        Key::KeyT => 't', Key::KeyY => 'y', Key::KeyU => 'u', Key::KeyI => 'i',
-        Key::KeyO => 'o', Key::KeyP => 'p', Key::KeyA => 'a', Key::KeyS => 's',
-        Key::KeyD => 'd', Key::KeyF => 'f', Key::KeyG => 'g', Key::KeyH => 'h',
-        Key::KeyJ => 'j', Key::KeyK => 'k', Key::KeyL => 'l', Key::KeyZ => 'z',
-        Key::KeyX => 'x', Key::KeyC => 'c', Key::KeyV => 'v', Key::KeyB => 'b',
-        Key::KeyN => 'n', Key::KeyM => 'm',
-        Key::LeftBracket => '[', Key::RightBracket => ']', Key::SemiColon => ';',
-        Key::Quote => '\'', Key::Comma => ',', Key::Dot => '.', Key::BackQuote => '`',
-        _ => return None,
+    // Буквы: физическая клавиша -> строчная латинская.
+    let letter = match key {
+        Key::KeyQ => Some('q'), Key::KeyW => Some('w'), Key::KeyE => Some('e'),
+        Key::KeyR => Some('r'), Key::KeyT => Some('t'), Key::KeyY => Some('y'),
+        Key::KeyU => Some('u'), Key::KeyI => Some('i'), Key::KeyO => Some('o'),
+        Key::KeyP => Some('p'), Key::KeyA => Some('a'), Key::KeyS => Some('s'),
+        Key::KeyD => Some('d'), Key::KeyF => Some('f'), Key::KeyG => Some('g'),
+        Key::KeyH => Some('h'), Key::KeyJ => Some('j'), Key::KeyK => Some('k'),
+        Key::KeyL => Some('l'), Key::KeyZ => Some('z'), Key::KeyX => Some('x'),
+        Key::KeyC => Some('c'), Key::KeyV => Some('v'), Key::KeyB => Some('b'),
+        Key::KeyN => Some('n'), Key::KeyM => Some('m'),
+        _ => None,
     };
 
-    let base = if russian {
-        en_char_to_ru(en_lower).unwrap_or(en_lower)
+    // US QWERTY: (без Shift, со Shift). None — клавиша не даёт символа слова.
+    let en = if let Some(lower) = letter {
+        // CapsLock влияет только на буквы.
+        if shift ^ caps_lock {
+            lower.to_ascii_uppercase()
+        } else {
+            lower
+        }
     } else {
-        en_lower
+        let (plain, shifted) = match key {
+            Key::LeftBracket => (Some('['), Some('{')),
+            Key::RightBracket => (Some(']'), Some('}')),
+            Key::SemiColon => (Some(';'), Some(':')),
+            Key::Quote => (Some('\''), Some('"')),
+            Key::Comma => (Some(','), Some('<')),
+            Key::Dot => (Some('.'), Some('>')),
+            Key::BackQuote => (Some('`'), Some('~')),
+            Key::Slash => (Some('/'), Some('?')),
+            Key::BackSlash => (None, Some('|')),
+            // Цифры слово разрывают, но их Shift-варианты — реальные символы.
+            Key::Num2 => (None, Some('@')),
+            Key::Num3 => (None, Some('#')),
+            Key::Num4 => (None, Some('$')),
+            Key::Num6 => (None, Some('^')),
+            Key::Num7 => (None, Some('&')),
+            Key::Num8 => (None, Some('*')),
+            Key::Num9 => (None, Some('(')),
+            Key::Num0 => (None, Some(')')),
+            Key::Minus => (None, Some('_')),
+            Key::Equal => (None, Some('+')),
+            _ => (None, None),
+        };
+        (if shift { shifted } else { plain })?
     };
 
-    let upper = if en_lower.is_ascii_alphabetic() {
-        shift ^ caps_lock
+    // Переводим по физической позиции клавиши в текущую раскладку.
+    let ch = if russian {
+        en_char_to_ru(en).unwrap_or(en)
     } else {
-        shift
-    };
-    let ch = if upper {
-        base.to_uppercase().next().unwrap_or(base)
-    } else {
-        base
+        en
     };
 
-    // Буквы, а также клавиши, которые в ЙЦУКЕН дают буквы (`.,rf` → `юбка`).
-    // В русской раскладке такие клавиши уже вернули букву выше, поэтому
-    // пунктуацию пропускаем только для английской.
+    // Буквы всегда часть слова. В английской раскладке к ним добавляются
+    // знаки, которые в ЙЦУКЕН стоят на тех же клавишах (`.,rf` → `юбка`,
+    // `ghbdtn&` → `привет?`). В русской раскладке знак — настоящий
+    // разделитель, поэтому его в слово не пускаем.
     let keep = ch.is_alphabetic() || (!russian && LATIN_KEYBOARD_PUNCTUATION.contains(&ch));
     if keep {
         Some(ch)
@@ -1998,60 +2298,133 @@ fn restore_clipboard(saved: SavedClipboard) {
     });
 }
 
-/// Отправляет Ctrl+<виртуальная клавиша>.
-///
-/// Ctrl отпускается в любом случае: явным `Release`, а если что-то пойдёт
-/// не так — `Drop` у `Enigo` (в `Settings::default()` включён
-/// `release_keys_when_dropped`). Именно незакрытый Ctrl давал «фантомный»
-/// Ctrl+F в браузере.
+/// Модификатор для работы с буфером обмена через Insert.
 #[cfg(windows)]
-fn ctrl_key(enigo: &mut enigo::Enigo, vk: u32, label: &str) -> bool {
+#[derive(Clone, Copy)]
+enum HotkeyModifier {
+    /// Ctrl+Insert — копирование выделения.
+    Control,
+    /// Shift+Insert — вставка.
+    Shift,
+}
+
+#[cfg(windows)]
+const VK_SHIFT_KEY: i32 = 0x10;
+#[cfg(windows)]
+const VK_CONTROL_KEY: i32 = 0x11;
+/// VK_INSERT — общая клавиша для копирования и вставки.
+#[cfg(windows)]
+const VK_INSERT: u32 = 0x2D;
+/// VK_C — только запасной вариант копирования.
+#[cfg(windows)]
+const VK_COPY_FALLBACK: u32 = 0x43;
+
+/// Клавиша зажата прямо сейчас.
+///
+/// `GetAsyncKeyState` видит и физическое удержание, и нашу инжекцию.
+/// Различать нужно из-за Double Shift: второй Shift остаётся в руках
+/// пользователя, пока работает поток конвертации, и лишний `Release`
+/// сломал бы регистр последующего ввода.
+#[cfg(windows)]
+fn key_is_held(vk: i32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+    // SAFETY: GetAsyncKeyState только читает состояние клавиатуры.
+    unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
+}
+
+/// Отправляет Ctrl+Insert или Shift+Insert.
+///
+/// Insert выбран вместо C/V из-за Double Shift: он срабатывает, пока второй
+/// Shift ещё физически зажат, а программный keyup удерживаемой клавиши
+/// Windows может проигнорировать. С Ctrl это давало Ctrl+Shift+C — в браузерах
+/// DevTools. Ctrl+Insert от лишнего Shift в опасное сочетание не превращается,
+/// а Shift+Insert зажатый Shift только помогает.
+///
+/// Модификатор, который уже зажат физически, не пережимается и не отпускается.
+#[cfg(windows)]
+fn send_hotkey(
+    enigo: &mut enigo::Enigo,
+    modifier: HotkeyModifier,
+    vk: u32,
+    label: &str,
+) -> bool {
     use enigo::{Direction, Key, Keyboard};
 
-    // Double Shift срабатывает, пока второй Shift ещё физически зажат.
-    // Если сразу отправить Ctrl+C, Windows увидит Ctrl+Shift+C (в браузерах
-    // это DevTools), а Ctrl+V превратится в Ctrl+Shift+V. Поэтому сначала
-    // принудительно отпускаем Shift/Alt/Win и даём приложению зафиксировать
-    // отпускание.
-    for key in [Key::Shift, Key::Alt, Key::Meta] {
-        let _ = enigo.key(key, Direction::Release);
-    }
-    std::thread::sleep(Duration::from_millis(20));
-
-    let mut ok = match enigo.key(Key::Control, Direction::Press) {
-        Ok(()) => true,
-        Err(err) => {
-            switcher_log(format!("{label}: Ctrl down не удался: {err}"));
-            false
+    // Alt и Win с Insert дают посторонние команды (Alt+Insert, Win+Insert).
+    // Отпускаем только реально зажатые: лишний keyup без keydown — мусорное
+    // событие, которое может сбить состояние модификаторов в приложении.
+    for (key, vk) in [(Key::Alt, 0x12), (Key::Meta, 0x5B)] {
+        if key_is_held(vk) {
+            let _ = enigo.key(key, Direction::Release);
         }
+    }
+
+    // Второй модификатор только мешает: Ctrl+Shift+Insert — уже не копирование.
+    let (modifier_key, modifier_vk, opposite_key, opposite_vk) = match modifier {
+        HotkeyModifier::Control => (Key::Control, VK_CONTROL_KEY, Key::Shift, VK_SHIFT_KEY),
+        HotkeyModifier::Shift => (Key::Shift, VK_SHIFT_KEY, Key::Control, VK_CONTROL_KEY),
     };
+    if key_is_held(opposite_vk) {
+        // Для Ctrl+Insert это попытка снять физически зажатый Shift.
+        // Windows может её проигнорировать (клавиша реально удерживается),
+        // но Ctrl+Shift+Insert безобиден — DevTools он не открывает.
+        let _ = enigo.key(opposite_key, Direction::Release);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let press_modifier = !key_is_held(modifier_vk);
+    let mut ok = true;
+
+    if press_modifier {
+        if let Err(err) = enigo.key(modifier_key, Direction::Press) {
+            switcher_log(format!("{label}: модификатор не нажался: {err}"));
+            ok = false;
+        } else {
+            // Даём приложению зафиксировать модификатор.
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
 
     if ok {
-        // Небольшая пауза, чтобы приложение успело зафиксировать модификатор.
-        std::thread::sleep(Duration::from_millis(15));
         if let Err(err) = enigo.key(Key::Other(vk), Direction::Click) {
-            switcher_log(format!("{label}: клавиша не нажалась: {err}"));
+            switcher_log(format!("{label}: клавиша {vk:#04X} не нажалась: {err}"));
             ok = false;
         }
     }
 
-    // Ctrl отпускаем в любом случае.
-    if let Err(err) = enigo.key(Key::Control, Direction::Release) {
-        switcher_log(format!("{label}: Ctrl up не удался: {err}"));
-        ok = false;
+    if press_modifier {
+        // Отпускаем в любом случае, даже если Insert не отправился.
+        if let Err(err) = enigo.key(modifier_key, Direction::Release) {
+            switcher_log(format!("{label}: модификатор не отпустился: {err}"));
+            ok = false;
+        }
     }
+
     ok
 }
 
-/// Отправляет Ctrl+V.
+/// Ждёт, пока приложение положит в буфер скопированный текст (до 400 мс).
+#[cfg(windows)]
+fn read_clipboard_text() -> Option<String> {
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(20));
+        if let Some(text) = win_clipboard::get_text() {
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+/// Вставляет через Shift+Insert.
 ///
-/// VK_V (0x56) — виртуальный код клавиши V, он не зависит от раскладки.
-/// Key::Unicode('v') использовать нельзя: VkKeyScanExW('v') в русской
-/// раскладке возвращает 0xFFFF, и enigo 0.3 вставляет символ как текст,
-/// из-за чего Ctrl+V не срабатывает.
+/// Shift+Insert понимают Блокнот, браузеры, Проводник, Office, Windows Terminal,
+/// cmd/pwsh и VS Code, и он не ломается, если Shift уже зажат (Double Shift).
 #[cfg(windows)]
 fn paste_clipboard(enigo: &mut enigo::Enigo) -> bool {
-    ctrl_key(enigo, 0x56, "paste")
+    send_hotkey(enigo, HotkeyModifier::Shift, VK_INSERT, "paste")
 }
 
 /// Определяет язык выделенного текста: `Some(true)` — русский,
@@ -2125,23 +2498,23 @@ fn convert_selection_blocking() -> bool {
         return false;
     };
 
-    // 2. Копируем выделение. Ctrl+C в приложении без выделения просто
-    //    ничего не положит в буфер.
-    let copied = if ctrl_key(&mut enigo, 0x43, "copy") {
-        let mut value = None;
-        for _ in 0..20 {
-            std::thread::sleep(Duration::from_millis(20));
-            if let Some(text) = win_clipboard::get_text() {
-                if !text.trim().is_empty() {
-                    value = Some(text);
-                    break;
-                }
-            }
+    // 2. Копируем выделение. Сначала Ctrl+Insert: он не превращается
+    //    в Ctrl+Shift+C, даже если второй Shift после Double Shift всё ещё
+    //    физически зажат — именно это открывало DevTools в браузерах.
+    let mut copied = None;
+    if send_hotkey(&mut enigo, HotkeyModifier::Control, VK_INSERT, "copy") {
+        copied = read_clipboard_text();
+    }
+
+    // Запасной вариант для приложений, где Ctrl+Insert не назначен.
+    // Ctrl+C безопасен только при отпущенном Shift: иначе снова Ctrl+Shift+C,
+    // поэтому при зажатом Shift запасной путь не пробуем.
+    if copied.is_none() && !key_is_held(VK_SHIFT_KEY) {
+        switcher_log("copy: Ctrl+Insert ничего не скопировал, пробуем Ctrl+C");
+        if send_hotkey(&mut enigo, HotkeyModifier::Control, VK_COPY_FALLBACK, "copy") {
+            copied = read_clipboard_text();
         }
-        value
-    } else {
-        None
-    };
+    }
 
     let Some(selected) = copied else {
         // Выделения не было — ничего не делаем.
@@ -2237,13 +2610,14 @@ fn replace_word(
     ensure_keyboard_layout(to_russian);
     std::thread::sleep(Duration::from_millis(30));
 
-    // 3. Вставляем через Ctrl+V.
+    // 3. Вставляем через Shift+Insert.
     let pasted = paste_clipboard(&mut enigo);
 
-    // 4. Ctrl+V не сработал — вводим текст одним SendInput через Unicode
-    //    (enigo 0.3 собирает все события в один батч, это не посимвольные лаги).
+    // 4. Горячая клавиша не отправилась — вводим текст одним SendInput через
+    //    Unicode (enigo 0.3 собирает все события в один батч, это не
+    //    посимвольные лаги).
     if !pasted {
-        switcher_log("paste: Ctrl+V не отправился, вводим текст через enigo.text()");
+        switcher_log("paste: Shift+Insert не отправился, вводим текст через enigo.text()");
         if let Err(err) = enigo.text(text) {
             switcher_log(format!("paste: enigo.text тоже не удался: {err}"));
         }
@@ -2450,6 +2824,17 @@ fn simulate_layout_switch() {}
 
 pub fn run() {
     tauri::Builder::default()
+        // Single instance обязан идти первым: плагин перехватывает запуск
+        // второй копии до инициализации остальных плагинов и до создания окна.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Второй процесс сразу завершается, а уже открытое окно
+            // поднимаем на передний план — в том числе из трея/свёрнутого вида.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
@@ -2547,7 +2932,8 @@ pub fn run() {
             write_list_file, merge_folders, sync_github, validate_list,
             check_zapret_version, download_zapret, delete_version, create_start_menu_shortcut,
             read_external_file, toggle_game_filter, get_game_filter_status,
-            toggle_ipset_filter, get_ipset_filter_status, list_strategies, install_strategy,
+            get_game_filter_config, set_ipset_state, get_ipset_state,
+            toggle_zapret_update_check, get_zapret_update_check_status, list_strategies, install_strategy,
             smart_parse_domains, clean_and_validate,
             consolidate_subdomains, check_dead_domains,
             get_trash_files, restore_trash_file, empty_trash,
@@ -2557,6 +2943,234 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod game_filter_tests {
+    use super::*;
+
+    /// Временная папка вида `%TEMP%\zapret-game-filter-<n>`.
+    fn temp_version_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zapret-game-filter-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("utils")).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn accepts_valid_port_ranges() {
+        for value in ["1024-65535", "443", "80,443,1000-2000", " 1024 - 65535 "] {
+            assert!(validate_port_range(value).is_ok(), "должен принять «{value}»");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_port_ranges() {
+        for value in ["", "  ", "abc", "0", "65536", "2000-1000", "80,", "-", "80-"] {
+            assert!(validate_port_range(value).is_err(), "должен отклонить «{value}»");
+        }
+    }
+
+    #[test]
+    fn writes_and_reads_service_bat_format() {
+        let dir = temp_version_dir("roundtrip");
+        let path = dir.to_string_lossy().to_string();
+
+        // Файла нет — фильтр выключен, значения по умолчанию.
+        let (enabled, mode, tcp, udp) = read_game_filter_config(&path);
+        assert!(!enabled);
+        assert_eq!(mode, "all");
+        assert_eq!(tcp, "1024-65535");
+        assert_eq!(udp, "1024-65535");
+
+        toggle_game_filter(
+            path.clone(),
+            true,
+            Some("tcp".to_string()),
+            Some("443".to_string()),
+            Some("1024-65535".to_string()),
+        )
+        .expect("toggle on");
+
+        let flag_file = dir.join("utils").join("game_filter.enabled");
+        assert_eq!(
+            fs::read_to_string(&flag_file).unwrap(),
+            "mode=tcp\ntcp=443\nudp=1024-65535\n"
+        );
+
+        let (enabled, mode, tcp, udp) = read_game_filter_config(&path);
+        assert!(enabled);
+        assert_eq!(mode, "tcp");
+        assert_eq!(tcp, "443");
+        assert_eq!(udp, "1024-65535");
+
+        // Выключение убирает файл.
+        toggle_game_filter(path.clone(), false, None, None, None).expect("toggle off");
+        assert!(!flag_file.exists());
+        assert!(!read_game_filter_config(&path).0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeps_old_stub_file_as_enabled() {
+        let dir = temp_version_dir("legacy");
+        let path = dir.to_string_lossy().to_string();
+        fs::write(dir.join("utils").join("game_filter.enabled"), "ENABLED").unwrap();
+
+        let (enabled, mode, tcp, udp) = read_game_filter_config(&path);
+        assert!(enabled);
+        // Ключей в старой заглушке нет — остаются значения по умолчанию.
+        assert_eq!(mode, "all");
+        assert_eq!(tcp, "1024-65535");
+        assert_eq!(udp, "1024-65535");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_unknown_mode() {
+        let dir = temp_version_dir("mode");
+        let path = dir.to_string_lossy().to_string();
+        let err = toggle_game_filter(
+            path,
+            true,
+            Some("icmp".to_string()),
+            None,
+            None,
+        )
+        .expect_err("icmp не поддерживается service.bat");
+        assert!(err.contains("icmp"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod service_flags_tests {
+    use super::*;
+
+    fn temp_version_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zapret-flags-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("lists")).expect("lists");
+        fs::create_dir_all(dir.join("utils")).expect("utils");
+        dir
+    }
+
+    const REAL_LIST: &str = "1.1.1.1/32\n2.2.2.2/32\n";
+
+    #[test]
+    fn ipset_reports_three_states() {
+        let dir = temp_version_dir("states");
+        let path = dir.to_string_lossy().to_string();
+
+        // Файла нет — фильтровать нечего.
+        assert_eq!(get_ipset_state(path.clone()), "none");
+
+        let list_file = dir.join("lists").join("ipset-all.txt");
+        fs::write(&list_file, REAL_LIST).unwrap();
+        assert_eq!(get_ipset_state(path.clone()), "loaded");
+
+        fs::write(&list_file, "203.0.113.113/32\n").unwrap();
+        assert_eq!(get_ipset_state(path.clone()), "none");
+
+        fs::write(&list_file, "").unwrap();
+        assert_eq!(get_ipset_state(path.clone()), "any");
+
+        // Пробелы и переводы строк пустым файл не делают.
+        fs::write(&list_file, "  \r\n\n").unwrap();
+        assert_eq!(get_ipset_state(path), "any");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ipset_keeps_backup_across_none_and_any() {
+        let dir = temp_version_dir("backup");
+        let path = dir.to_string_lossy().to_string();
+        let list_file = dir.join("lists").join("ipset-all.txt");
+        let backup_file = dir.join("lists").join("ipset-all.txt.backup");
+        fs::write(&list_file, REAL_LIST).unwrap();
+
+        set_ipset_state(path.clone(), "none".into()).expect("none");
+        assert_eq!(fs::read_to_string(&list_file).unwrap(), "203.0.113.113/32\n");
+        assert_eq!(fs::read_to_string(&backup_file).unwrap(), REAL_LIST);
+
+        // Переход none → any не должен затереть бэкап пустым файлом.
+        set_ipset_state(path.clone(), "any".into()).expect("any");
+        assert_eq!(fs::read_to_string(&list_file).unwrap(), "");
+        assert_eq!(fs::read_to_string(&backup_file).unwrap(), REAL_LIST);
+        assert_eq!(get_ipset_state(path.clone()), "any");
+
+        // Возврат к рабочему списку восстанавливает исходное содержимое.
+        set_ipset_state(path.clone(), "loaded".into()).expect("loaded");
+        assert_eq!(fs::read_to_string(&list_file).unwrap(), REAL_LIST);
+        assert!(!backup_file.exists());
+        assert_eq!(get_ipset_state(path), "loaded");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ipset_allows_loaded_to_any() {
+        let dir = temp_version_dir("loaded-any");
+        let path = dir.to_string_lossy().to_string();
+        let list_file = dir.join("lists").join("ipset-all.txt");
+        let backup_file = dir.join("lists").join("ipset-all.txt.backup");
+        fs::write(&list_file, REAL_LIST).unwrap();
+
+        set_ipset_state(path.clone(), "any".into()).expect("any");
+        assert_eq!(fs::read_to_string(&list_file).unwrap(), "");
+        assert_eq!(fs::read_to_string(&backup_file).unwrap(), REAL_LIST);
+
+        set_ipset_state(path, "loaded".into()).expect("loaded");
+        assert_eq!(fs::read_to_string(&list_file).unwrap(), REAL_LIST);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ipset_rejects_unknown_state() {
+        let dir = temp_version_dir("bad-state");
+        let path = dir.to_string_lossy().to_string();
+        let err = set_ipset_state(path, "everything".into()).expect_err("неизвестное состояние");
+        assert!(err.contains("everything"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zapret_update_flag_toggles_file() {
+        let dir = temp_version_dir("updates");
+        let path = dir.to_string_lossy().to_string();
+        let flag = dir.join("utils").join("check_updates.enabled");
+
+        assert!(!get_zapret_update_check_status(path.clone()));
+
+        toggle_zapret_update_check(path.clone(), true).expect("on");
+        assert!(flag.exists());
+        assert!(get_zapret_update_check_status(path.clone()));
+
+        toggle_zapret_update_check(path.clone(), false).expect("off");
+        assert!(!flag.exists());
+        assert!(!get_zapret_update_check_status(path));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_defaults_to_enabled_autocheck() {
+        // Новый конфиг и старый файл без поля — автопроверка включена.
+        assert!(Config::default().auto_check_updates);
+        let old: Config = serde_json::from_str(r#"{"root_path":null}"#).expect("old config");
+        assert!(old.auto_check_updates);
+
+        // Явное false переживает сериализацию.
+        let mut config = Config::default();
+        config.auto_check_updates = false;
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: Config = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.auto_check_updates);
+    }
 }
 
 #[cfg(test)]
@@ -2584,9 +3198,51 @@ mod switcher_tests {
         // Русская раскладка: те же клавиши уже дают буквы.
         assert_eq!(key_to_char(Key::Dot, false, false, true), Some('ю'));
         assert_eq!(key_to_char(Key::Comma, false, false, true), Some('б'));
-        // Цифры и прочие знаки по-прежнему разрывают слово.
+        // Shift-варианты цифровых клавиш — настоящие символы слова.
+        assert_eq!(key_to_char(Key::Num2, true, false, false), Some('@'));
+        assert_eq!(key_to_char(Key::Num7, true, false, false), Some('&'));
+        // В русской раскладке это уже настоящие знаки-разделители.
+        assert_eq!(key_to_char(Key::Num2, true, false, true), None);
+        assert_eq!(key_to_char(Key::Num7, true, false, true), None);
+        // Shift на знаковых клавишах.
+        assert_eq!(key_to_char(Key::LeftBracket, true, false, false), Some('{'));
+        assert_eq!(key_to_char(Key::LeftBracket, true, false, true), Some('Х'));
+        assert_eq!(key_to_char(Key::Slash, true, false, false), Some('?'));
+        // Цифры без Shift и прочие служебные клавиши слово разрывают.
         assert_eq!(key_to_char(Key::Num1, false, false, false), None);
-        assert_eq!(key_to_char(Key::Slash, false, false, false), None);
+        assert_eq!(key_to_char(Key::Num5, false, false, true), None);
+        assert_eq!(key_to_char(Key::BackSlash, false, false, false), None);
+    }
+
+    #[test]
+    fn converts_special_characters() {
+        // Пары из карты соответствия QWERTY <-> ЙЦУКЕН.
+        assert_eq!(convert_layout("ghbdtn&", true), "привет?");
+        assert_eq!(convert_layout("ghbdtn@", true), "привет\"");
+        assert_eq!(convert_layout("привет\"", false), "ghbdtn@");
+        assert_eq!(convert_layout("привет?", false), "ghbdtn&");
+
+        for (en, ru) in [
+            ("#", "№"),
+            ("$", ";"),
+            ("^", ":"),
+            (":", "Ж"),
+            ("<", "Б"),
+            (">", "Ю"),
+            ("~", "Ё"),
+            ("{", "Х"),
+            ("}", "Ъ"),
+            ("|", "/"),
+            // Клавиша Slash: `.` в ЙЦУКЕН, `/` — без Shift в QWERTY.
+            ("/", "."),
+            ("?", ","),
+        ] {
+            assert_eq!(convert_layout(en, true), ru, "EN->RU: {en}");
+            assert_eq!(convert_layout(ru, false), en, "RU->EN: {ru}");
+        }
+        // Повторный Double Shift возвращает исходный текст.
+        assert_eq!(convert_layout(&convert_layout("ghbdtn&", true), false), "ghbdtn&");
+        assert_eq!(convert_layout(&convert_layout("ghbdtn/", true), false), "ghbdtn/");
     }
 
     #[test]

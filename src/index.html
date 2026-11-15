@@ -86,8 +86,27 @@
     .status-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--text-3); }
     .status-dot.on { background: var(--positive); box-shadow: 0 0 0 3px rgba(76, 195, 138, 0.12); }
     .status-inline { display: inline-flex; align-items: center; gap: 8px; }
+    /* Авто-проверки: длинные подписи не переносятся внутри тумблера,
+       а переносится вся группа — строка остаётся читаемой. */
+    .updates-row { column-gap: 18px; row-gap: 8px; }
+    .updates-row .switch span:last-child { white-space: nowrap; }
     .bar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .quick-actions { display: flex; align-items: center; gap: 8px; }
+
+    /* Game Filter: порты service.bat */
+    .filter-ports { display: none; column-gap: 14px; row-gap: 8px; }
+    .filter-ports.is-open { display: flex; animation: filter-ports-in 180ms var(--ease); }
+    @keyframes filter-ports-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+    .port-field { display: flex; align-items: center; gap: 6px; }
+    .port-field[hidden] { display: none; }
+    .port-label { flex: none; font-size: 11px; line-height: 16px; color: var(--text-3); white-space: nowrap; }
+    .input.port-input { width: 118px; height: 30px; padding: 0 8px; flex: none; font: 400 12px/1 var(--font-mono); letter-spacing: 0.02em; }
+    .input.port-input.is-invalid { border-color: rgba(224, 108, 117, 0.6); box-shadow: 0 0 0 3px var(--danger-soft); }
+    /* Выше по файлу у .status-row > .select-wrap своя ширина — здесь она уже. */
+    .status-row.filter-ports > .select-wrap { flex: none; width: 134px; min-width: 0; }
+    .filter-ports .select-wrap select { height: 30px; font-size: 12px; }
+    .status-row.filter-bar > .select-wrap { flex: none; width: 178px; min-width: 0; }
+    @media (prefers-reduced-motion: reduce) { .filter-ports.is-open { animation: none; } }
 
     .badge { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; flex: none; background: var(--surface-raised); border: 1px solid var(--line); border-radius: 6px; color: var(--text-2); font: 500 11px/1 var(--font-mono); white-space: nowrap; }
     .badge .icon { width: 13px; height: 13px; color: var(--positive); }
@@ -170,6 +189,7 @@
     .tool-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; color: var(--text-2); }
     .tool-title .icon { width: 14px; height: 14px; color: var(--text-3); }
     .hint { font-size: 11px; line-height: 16px; color: var(--text-3); }
+    .tool-hint { font-size: 11px; line-height: 15px; color: var(--text-3); }
 
     .file-editor { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
     .editor-head { display: flex; align-items: center; justify-content: space-between; flex: none; gap: 12px; min-height: 20px; }
@@ -239,19 +259,11 @@
     .folder-row .name { flex: 1; min-width: 0; font: 400 12px/16px var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .folder-row .name.ok { color: var(--text-2); }
 
-    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
     .field-label { font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); }
     .switcher-body { display: flex; flex-direction: column; gap: 16px; }
     .switcher-head-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .exception-empty { padding: 10px 8px; color: var(--text-3); font: 400 12px/18px var(--font-ui); }
-    .radio-group { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-height: 34px; }
-    .radio { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); cursor: pointer; }
-    .radio input { position: absolute; width: 0; height: 0; opacity: 0; }
-    .radio-dot { display: grid; place-items: center; width: 14px; height: 14px; flex: none; border: 1px solid var(--line-strong); border-radius: 50%; }
-    .radio input:checked + .radio-dot { border-color: var(--accent); }
-    .radio input:checked + .radio-dot::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-    .radio input:focus-visible + .radio-dot { outline: 2px solid var(--accent); outline-offset: 2px; }
     .inline-field { display: flex; gap: 8px; }
     .inline-field .input { flex: 1; min-width: 0; }
     .inline-field.actions-wrap { flex-wrap: wrap; }
@@ -312,7 +324,6 @@
       .file-list { flex: none; max-height: 240px; }
       .file-editor { flex: none; }
       .editor-container { flex: none; height: 320px; }
-      .form-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 620px) {
       .app-header { align-items: flex-start; flex-direction: column; }
@@ -331,6 +342,31 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
     }
+
+    /* Глобальная консоль: выезжающая снизу панель, видна на всех вкладках.
+       Пустая панель скрыта целиком, свёрнутая занимает только строку заголовка. */
+    body { transition: padding-bottom 220ms var(--ease); }
+    body.has-log-drawer { padding-bottom: 60px; }
+    body.log-drawer-open { padding-bottom: 220px; }
+
+    .log-drawer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900; display: flex; flex-direction: column; background: rgba(11, 13, 18, 0.86); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); border-top: 1px solid var(--line-strong); box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.38); }
+    .log-drawer[hidden] { display: none; }
+    .log-drawer-head { display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 24px; background: transparent; border: 0; color: var(--text-2); font: 500 12px/1 var(--font-ui); cursor: pointer; transition: background 140ms var(--ease), color 140ms var(--ease); }
+    .log-drawer-head:hover { background: rgba(232, 235, 243, 0.04); color: var(--text); }
+    .log-drawer-head .icon { width: 14px; height: 14px; flex: none; color: var(--text-3); transition: transform 200ms var(--ease); }
+    .log-drawer.is-open .log-drawer-head .icon { transform: rotate(180deg); }
+    .log-drawer-title { flex: none; }
+    .log-drawer-count { flex: none; min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--surface-raised); color: var(--text-3); font-size: 11px; text-align: center; }
+    .log-drawer-hint { flex: 1 1 auto; text-align: right; color: var(--text-3); font-weight: 400; }
+    .log-drawer-body { flex: none; max-height: 0; margin: 0; padding: 0 12px; overflow: hidden; background: transparent; border: 0; opacity: 0; transition: max-height 220ms var(--ease), opacity 160ms var(--ease), padding 220ms var(--ease); }
+    .log-drawer.is-open .log-drawer-body { max-height: 168px; padding: 4px 12px 10px; overflow-y: auto; opacity: 1; }
+    .log-drawer-body::-webkit-scrollbar { width: 8px; }
+    .log-drawer-body::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
+
+    /* Тосты не прячутся за панелью: поднимаем их над ней. */
+    .toast-container { transition: bottom 220ms var(--ease); }
+    body.has-log-drawer .toast-container { bottom: 56px; }
+    body.log-drawer-open .toast-container { bottom: 220px; }
   </style>
 </head>
 <body>
@@ -374,11 +410,6 @@
       </div>
     </div>
     <div class="header-actions">
-      <button id="checkAppUpdateBtn" class="btn btn-secondary" type="button" title="Проверить обновления программы">
-        <span class="spinner btn-spinner" id="appUpdateSpinner" hidden></span>
-        <svg class="icon"><use href="#i-refresh"></use></svg>
-        <span class="app-update-label">Проверить обновления программы</span>
-      </button>
       <button id="btnAutostart" class="autostart" type="button" aria-pressed="false">
         <svg class="icon"><use href="#i-power"></use></svg>
         <span id="btnAutostartLabel">Автозапуск: выкл</span>
@@ -461,10 +492,53 @@
         <span class="switch-track"><span class="switch-thumb"></span></span>
         <span>Game Filter</span>
       </label>
-      <label class="switch">
-        <input type="checkbox" id="toggleIpset">
+      <div class="select-wrap">
+        <select id="ipsetState" aria-label="IPSet Filter">
+          <option value="loaded">IPSet: загружен</option>
+          <option value="none">IPSet: выключен</option>
+          <option value="any">IPSet: все IP</option>
+        </select>
+        <svg class="select-chevron"><use href="#i-chevron-down"></use></svg>
+      </div>
+    </div>
+
+    <div class="filter-ports status-row" id="gameFilterPorts">
+      <div class="status-inline">
+        <span class="meta-label">Порты</span>
+      </div>
+      <div class="select-wrap">
+        <select id="gameFilterMode" aria-label="Протокол Game Filter">
+          <option value="all">TCP + UDP</option>
+          <option value="tcp">Только TCP</option>
+          <option value="udp">Только UDP</option>
+        </select>
+        <svg class="select-chevron"><use href="#i-chevron-down"></use></svg>
+      </div>
+      <div class="port-field" id="gameFilterTcpField">
+        <label class="port-label" for="gameFilterTcp">TCP</label>
+        <input class="input port-input" type="text" id="gameFilterTcp" value="1024-65535" spellcheck="false" autocomplete="off" aria-describedby="gameFilterHint">
+      </div>
+      <div class="port-field" id="gameFilterUdpField">
+        <label class="port-label" for="gameFilterUdp">UDP</label>
+        <input class="input port-input" type="text" id="gameFilterUdp" value="1024-65535" spellcheck="false" autocomplete="off" aria-describedby="gameFilterHint">
+      </div>
+      <button class="btn btn-secondary" type="button" id="gameFilterApply">Применить</button>
+      <span class="hint" id="gameFilterHint" style="margin:0;">Диапазон вида <code>1024-65535</code> или список.</span>
+    </div>
+
+    <div class="status-row updates-row" id="updatesRow">
+      <div class="status-inline">
+        <span class="meta-label">Обновления</span>
+      </div>
+      <label class="switch" title="Создает флаг для service.bat">
+        <input type="checkbox" id="toggleZapretUpdates" disabled>
         <span class="switch-track"><span class="switch-thumb"></span></span>
-        <span>IPSet Filter</span>
+        <span>Авто-проверка Zapret</span>
+      </label>
+      <label class="switch" title="Проверять новые версии Zapret Tools при запуске">
+        <input type="checkbox" id="toggleAppUpdates">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span>Авто-проверка Zapret Tools</span>
       </label>
     </div>
   </div>
@@ -506,13 +580,14 @@
           <div class="tool-box">
             <div class="tool-title">
               <svg class="icon"><use href="#i-refresh"></use></svg>
-              <span>Обновление из GitHub</span>
+              <span>Обновление ядра Zapret</span>
             </div>
-            <p class="hint">Проверка новой сборки и перенос списков</p>
-            <button id="updateZapretBtn" class="btn btn-secondary btn-block" type="button">
+            <button id="updateZapretBtn" class="btn btn-secondary btn-block" type="button"
+                    title="Скачать новую сборку Zapret и перенести в неё ваши списки">
               <svg class="icon"><use href="#i-download"></use></svg>
-              <span id="updateZapretLabel">Проверить обновление</span>
+              <span id="updateZapretLabel">Обновить Zapret</span>
             </button>
+            <p class="tool-hint">Перенесет ваши списки в новую версию</p>
           </div>
         </aside>
 
@@ -628,7 +703,6 @@
       </button>
     </div>
     <div class="versions-list" id="versionsList"></div>
-    <div id="versionsLog" class="log" style="margin-top:12px;"></div>
   </div>
 
   <div id="tab-trash" class="tab-content" role="tabpanel">
@@ -664,28 +738,10 @@
       </div>
 
       <div class="switcher-body">
-        <div class="form-grid">
-          <div class="field">
-            <span class="field-label">Ручное переключение</span>
-            <p class="hint" style="margin:0;">Системное сочетание Windows (Alt + Shift или Win + Space). Свитчер его не перехватывает.</p>
-          </div>
-
-          <div class="field">
-            <span class="field-label">Режим</span>
-            <div class="radio-group" role="radiogroup" aria-label="Режим переключения">
-              <label class="radio">
-                <input type="radio" name="switcherMode" checked disabled>
-                <span class="radio-dot"></span>
-                Авто по словарю
-              </label>
-              <label class="radio">
-                <input type="radio" name="switcherMode" disabled>
-                <span class="radio-dot"></span>
-                Плюс ручное сочетание
-              </label>
-            </div>
-          </div>
-        </div>
+        <p class="hint" style="margin:0;">
+          Свитчер работает автоматически: исправляет слова по словарю сразу после пробела, а <b>Double Shift</b> переводит последнее слово или выделенный текст в любом случае.
+          Системное сочетание Windows (Alt + Shift или Win + Space) свитчер не перехватывает.
+        </p>
 
         <div class="field">
           <label class="field-label" for="switcherException">Исключения</label>
@@ -735,6 +791,19 @@
 
 <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 
+<!-- Глобальная консоль: живёт вне вкладок, поэтому видна при «Старт/Стоп»
+     с любой открытой вкладкой. id="versionsLog" сохранён для старого JS. -->
+<div id="logDrawer" class="log-drawer" hidden>
+  <button id="logDrawerToggle" class="log-drawer-head" type="button"
+          aria-expanded="false" aria-controls="versionsLog" title="Свернуть или развернуть консоль">
+    <svg class="icon"><use href="#i-chevron-down"></use></svg>
+    <span class="log-drawer-title">Консоль</span>
+    <span class="log-drawer-count" id="logDrawerCount">0</span>
+    <span class="log-drawer-hint" id="logDrawerHint">Развернуть</span>
+  </button>
+  <div id="versionsLog" class="log log-drawer-body" role="log" aria-live="polite"></div>
+</div>
+
 <div id="customConfirm" class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
   <div class="modal-content">
     <h3 class="modal-title" id="confirmTitle">Подтверждение</h3>
@@ -755,12 +824,67 @@
   function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
+  // ---- Глобальная консоль (bottom drawer) ---------------------------------
+  // Ограничение действует только на #versionsLog: остальные логи
+  // (#log, #trashLog, #fileLog) остаются локальными и растут как раньше.
+  const LOG_DRAWER_LIMIT = 100;
+
+  function syncLogDrawer() {
+    const drawer = $id('logDrawer');
+    const body = $id('versionsLog');
+    if (!drawer || !body) return;
+    const count = body.childElementCount;
+    drawer.hidden = count === 0;
+    document.body.classList.toggle('has-log-drawer', count > 0);
+    const badge = $id('logDrawerCount');
+    if (badge) badge.textContent = String(count);
+  }
+
+  function setLogDrawerOpen(open) {
+    const drawer = $id('logDrawer');
+    if (!drawer) return;
+    drawer.classList.toggle('is-open', open);
+    document.body.classList.toggle('log-drawer-open', open);
+    const toggle = $id('logDrawerToggle');
+    if (toggle) toggle.setAttribute('aria-expanded', String(open));
+    const hint = $id('logDrawerHint');
+    if (hint) hint.textContent = open ? 'Свернуть' : 'Развернуть';
+
+    if (open) {
+      const body = $id('versionsLog');
+      if (!body) return;
+      body.scrollTop = body.scrollHeight;
+      // max-height анимируется 220 мс: до конца анимации scrollHeight
+      // ещё не отражает итоговую высоту панели.
+      setTimeout(() => { body.scrollTop = body.scrollHeight; }, 240);
+    }
+  }
+
+  $id('logDrawerToggle').onclick = () => {
+    setLogDrawerOpen(!$id('logDrawer').classList.contains('is-open'));
+  };
+
   function logTo(el, msg, cls) {
     if (!el) return;
     const d = document.createElement('div');
     d.className = 'log-line ' + (cls || '');
     d.innerHTML = msg;
+
+    const isDrawer = el.id === 'versionsLog';
+    if (isDrawer) {
+      // Держим только последние 100 строк, иначе панель растёт бесконечно.
+      while (el.childElementCount >= LOG_DRAWER_LIMIT) el.firstElementChild.remove();
+    }
+
     el.appendChild(d);
+
+    if (isDrawer) {
+      syncLogDrawer();
+      // Новое сообщение само раскрывает панель: иначе лог «Старт/Стоп»
+      // не видно, когда открыта вкладка «Списки» или «Импорт».
+      setLogDrawerOpen(true);
+    }
+
     el.scrollTop = el.scrollHeight;
   }
 
@@ -867,7 +991,7 @@
 
   restoreWindowGeometry().then(watchWindowGeometry);
 
-  let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null, trashFiles: [], switcherEnabled: false, switcherExclusions: [], switcherWordExclusions: [], switcherDictionariesReady: false, switcherAdmin: true, switcherAdminWarned: false, switcherEventsBound: false, switcherProcesses: [] };
+  let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null, trashFiles: [], switcherEnabled: false, switcherExclusions: [], switcherWordExclusions: [], switcherDictionariesReady: false, switcherAdmin: true, switcherAdminWarned: false, switcherEventsBound: false, switcherProcesses: [], autoCheckUpdates: true };
 
   function setAutostartUI(on) {
     $id('btnAutostartLabel').textContent = on ? 'Автозапуск: вкл' : 'Автозапуск: выкл';
@@ -880,6 +1004,14 @@
     setAutostartUI(autoStart);
 
     const config = await invoke('get_config');
+
+    // Автопроверка обновлений программы: у старых конфигов поля нет —
+    // считаем, что она включена (см. Config::default в lib.rs).
+    state.autoCheckUpdates = config.auto_check_updates !== false;
+    $id('toggleAppUpdates').checked = state.autoCheckUpdates;
+    // Проверка уйдёт через 2 секунды, чтобы не соревноваться со стартом;
+    // при выключенном тумблере scheduleAppUpdateCheck() ничего не планирует.
+    scheduleAppUpdateCheck();
 
     // Свитчер раскладки не зависит от папки Zapret — запускаем сразу.
     // Ждём загрузку его настроек, чтобы последующие save_config
@@ -927,23 +1059,27 @@
   };
 
   // Проверка обновлений самой программы через tauri-plugin-updater.
-  $id('checkAppUpdateBtn').onclick = async () => {
-    const btn = $id('checkAppUpdateBtn');
-    const spinner = $id('appUpdateSpinner');
-    if (btn.disabled) return;
+  // Отдельной кнопки в шапке нет: проверку запускает только тумблер
+  // «Авто-проверка Zapret Tools» через scheduleAppUpdateCheck().
+  let appUpdateInFlight = false;
 
-    btn.disabled = true;
-    btn.classList.add('is-busy');
-    if (spinner) spinner.hidden = false;
+  // silent = true — фоновая автопроверка: молчим, если обновлений нет
+  // и если репозиторий недоступен, чтобы не мешать при старте.
+  async function runAppUpdateCheck({ silent = false } = {}) {
+    // Старт приложения и переключение тумблера могут совпасть — второй
+    // параллельный запрос не нужен.
+    if (appUpdateInFlight) return;
+    appUpdateInFlight = true;
 
     try {
       const update = await invoke('plugin:updater|check');
       if (update && update.version) {
-        showToast(`Доступна версия ${update.version}. Установка появится после настройки подписи.`, 'info');
-      } else {
+        showToast(`Доступна новая версия Zapret Tools ${update.version}.`, 'info', { timeout: 9000 });
+      } else if (!silent) {
         showToast('У вас последняя версия программы.', 'success');
       }
     } catch (err) {
+      if (silent) return;
       const text = String(err && err.message ? err.message : err);
       // Плагин не отдаёт HTTP-код: 403/404 приватного репозитория он превращает
       // в «Could not fetch a valid release JSON from the remote» (ReleaseNotFound).
@@ -955,11 +1091,23 @@
         'error'
       );
     } finally {
-      btn.disabled = false;
-      btn.classList.remove('is-busy');
-      if (spinner) spinner.hidden = true;
+      appUpdateInFlight = false;
     }
-  };
+  }
+
+  let appUpdateTimer = null;
+
+  // Через 2 секунды после старта или включения тумблера: интерфейс успевает
+  // отрисоваться. Выключение тумблера до этого момента отменяет проверку.
+  function scheduleAppUpdateCheck() {
+    clearTimeout(appUpdateTimer);
+    appUpdateTimer = null;
+    if (!state.autoCheckUpdates) return;
+    appUpdateTimer = setTimeout(() => {
+      appUpdateTimer = null;
+      runAppUpdateCheck({ silent: true });
+    }, 2000);
+  }
 
   $id('connectRootBtn').onclick = async () => {
     const selected = await open({ directory: true, multiple: false, title: 'Выберите папку Zapret' });
@@ -994,10 +1142,9 @@
       $id('listsContent').style.display = 'flex';
       await persistConfig();
 
-      const gameStatus = await invoke('get_game_filter_status', { versionPath: state.activeVersion.path });
-      const ipsetStatus = await invoke('get_ipset_filter_status', { versionPath: state.activeVersion.path });
-      $id('toggleGame').checked = gameStatus;
-      $id('toggleIpset').checked = ipsetStatus;
+      await syncGameFilterUi();
+      await syncIpsetState();
+      await syncZapretUpdates();
 
       const select = $id('strategySelect');
       select.innerHTML = '<option value="">Стратегия не выбрана</option>';
@@ -1056,17 +1203,221 @@
     } catch(e) { showToast('Ошибка установки стратегии: ' + e, 'error'); }
   };
 
+  // ---- Game Filter: порты service.bat -------------------------------------
+  const GAME_FILTER_DEFAULT_PORTS = '1024-65535';
+
+  // service.bat читает `mode=all|tcp|udp`, `tcp=...`, `udp=...` без проверок,
+  // поэтому мусор отсекаем здесь: иначе служба просто не запустится.
+  const PORT_TOKEN = /^(\d{1,5})(?:-(\d{1,5}))?$/;
+
+  function isValidPortRange(value) {
+    if (!value) return false;
+    return value.split(',').every(part => {
+      const match = part.trim().match(PORT_TOKEN);
+      if (!match) return false;
+      const start = Number(match[1]);
+      const end = match[2] ? Number(match[2]) : start;
+      return start >= 1 && end <= 65535 && start <= end;
+    });
+  }
+
+  function portFieldVisible(input) {
+    const field = input.closest('.port-field');
+    return !field || !field.hidden;
+  }
+
+  function updateGameFilterMode() {
+    const mode = $id('gameFilterMode').value;
+    $id('gameFilterTcpField').hidden = mode === 'udp';
+    $id('gameFilterUdpField').hidden = mode === 'tcp';
+  }
+
+  function setGameFilterPortsVisible(enabled) {
+    $id('gameFilterPorts').classList.toggle('is-open', Boolean(enabled));
+  }
+
+  function markGameFilterPortsValidity() {
+    let ok = true;
+    ['gameFilterTcp', 'gameFilterUdp'].forEach(id => {
+      const input = $id(id);
+      // Скрытое поле не проверяем: его значение всё равно уйдёт в файл
+      // как есть, а видимое пользователь может исправить.
+      const valid = !portFieldVisible(input) || isValidPortRange(input.value.trim());
+      input.classList.toggle('is-invalid', !valid);
+      if (!valid) ok = false;
+    });
+    return ok;
+  }
+
+  function gameFilterPayload() {
+    const tcpInput = $id('gameFilterTcp');
+    const udpInput = $id('gameFilterUdp');
+    const valueOf = input => {
+      const value = input.value.trim();
+      // Скрытое поле: оставляем валидное значение, иначе — дефолт.
+      if (!isValidPortRange(value)) return GAME_FILTER_DEFAULT_PORTS;
+      return value;
+    };
+    return {
+      versionPath: state.activeVersion.path,
+      enabled: $id('toggleGame').checked,
+      mode: $id('gameFilterMode').value,
+      tcpRange: valueOf(tcpInput),
+      udpRange: valueOf(udpInput),
+    };
+  }
+
+  async function saveGameFilterConfig(toastMessage) {
+    if (!state.activeVersion) return false;
+    // Выключение должно срабатывать всегда, даже если в полях остался мусор:
+    // файл просто удаляется, а порты в него не попадают.
+    if ($id('toggleGame').checked && !markGameFilterPortsValidity()) {
+      showToast('Порты: число 1–65535 или диапазон, например 1024-65535.', 'error');
+      return false;
+    }
+    try {
+      await invoke('toggle_game_filter', gameFilterPayload());
+      if (toastMessage) showToast(toastMessage, 'success');
+      return true;
+    } catch (e) {
+      showToast('Не удалось сохранить Game Filter: ' + e, 'error');
+      return false;
+    }
+  }
+
+  async function syncGameFilterUi() {
+    if (!state.activeVersion) {
+      setGameFilterPortsVisible(false);
+      return;
+    }
+    // Rust отдаёт кортеж: (включён, режим, tcp, udp).
+    const [enabled, mode, tcp, udp] = await invoke('get_game_filter_config', { versionPath: state.activeVersion.path });
+    $id('toggleGame').checked = enabled;
+    $id('gameFilterMode').value = ['all', 'tcp', 'udp'].includes(mode) ? mode : 'all';
+    $id('gameFilterTcp').value = tcp || GAME_FILTER_DEFAULT_PORTS;
+    $id('gameFilterUdp').value = udp || GAME_FILTER_DEFAULT_PORTS;
+    $id('gameFilterTcp').classList.remove('is-invalid');
+    $id('gameFilterUdp').classList.remove('is-invalid');
+    updateGameFilterMode();
+    setGameFilterPortsVisible(enabled);
+  }
+
   $id('toggleGame').onchange = async (e) => {
     if (!state.activeVersion) return;
-    await invoke('toggle_game_filter', { versionPath: state.activeVersion.path, enable: e.target.checked });
-    showToast('Game Filter ' + (e.target.checked ? 'включён' : 'выключен') + '. Перезапустите службу.', 'success');
+    const enabled = e.target.checked;
+    setGameFilterPortsVisible(enabled);
+    const saved = await saveGameFilterConfig();
+    if (!saved) {
+      // Файл не записался — возвращаем тумблер в прежнее положение.
+      e.target.checked = !enabled;
+      setGameFilterPortsVisible(!enabled);
+      return;
+    }
+    showToast('Game Filter ' + (enabled ? 'включён' : 'выключен') + '. Перезапустите службу.', 'success');
   };
 
-  $id('toggleIpset').onchange = async (e) => {
+  $id('gameFilterMode').onchange = async () => {
+    updateGameFilterMode();
+    await saveGameFilterConfig();
+  };
+
+  ['gameFilterTcp', 'gameFilterUdp'].forEach(id => {
+    // change срабатывает по Enter и по уходу из поля — сохраняем сразу,
+    // чтобы значения не терялись при закрытии окна.
+    $id(id).addEventListener('change', () => { saveGameFilterConfig(); });
+    $id(id).addEventListener('input', () => {
+      $id(id).classList.toggle('is-invalid', !isValidPortRange($id(id).value.trim()));
+    });
+  });
+
+  $id('gameFilterApply').onclick = async () => {
     if (!state.activeVersion) return;
-    await invoke('toggle_ipset_filter', { versionPath: state.activeVersion.path, enable: e.target.checked });
-    await selectListFile(state.currentListFile);
-    showToast('IPSet ' + (e.target.checked ? 'включён' : 'выключен') + '. Перезапустите службу.', 'success');
+    if (!$id('toggleGame').checked) {
+      showToast('Сначала включите Game Filter.', 'info');
+      return;
+    }
+    await saveGameFilterConfig('Настройки Game Filter сохранены. Перезапустите службу.');
+  };
+
+  // ---- IPSet: три состояния service.bat -----------------------------------
+  const IPSET_LABELS = {
+    loaded: 'загружен',
+    none: 'выключен',
+    any: 'все IP'
+  };
+
+  async function syncIpsetState() {
+    const select = $id('ipsetState');
+    if (!state.activeVersion) {
+      select.value = 'none';
+      select.dataset.previous = 'none';
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    // Rust отвечает строкой "loaded" | "none" | "any".
+    const value = await invoke('get_ipset_state', { versionPath: state.activeVersion.path });
+    const current = IPSET_LABELS[value] ? value : 'none';
+    select.value = current;
+    select.dataset.previous = current;
+  }
+
+  $id('ipsetState').onchange = async (e) => {
+    if (!state.activeVersion) return;
+    const select = e.target;
+    const previous = select.dataset.previous || 'none';
+    const next = select.value;
+
+    select.disabled = true;
+    try {
+      await invoke('set_ipset_state', { versionPath: state.activeVersion.path, state: next });
+      select.dataset.previous = next;
+      // Содержимое ipset-all.txt изменилось — перечитываем открытый файл.
+      if (state.currentListFile) await selectListFile(state.currentListFile);
+      showToast('IPSet: ' + IPSET_LABELS[next] + '. Перезапустите службу.', 'success');
+    } catch (err) {
+      select.value = previous;
+      showToast('Не удалось изменить IPSet: ' + err, 'error');
+    } finally {
+      select.disabled = !state.activeVersion;
+    }
+  };
+
+  // ---- Обновления ---------------------------------------------------------
+  async function syncZapretUpdates() {
+    const toggle = $id('toggleZapretUpdates');
+    if (!state.activeVersion) {
+      toggle.checked = false;
+      toggle.disabled = true;
+      return;
+    }
+    toggle.disabled = false;
+    toggle.checked = await invoke('get_zapret_update_check_status', { versionPath: state.activeVersion.path });
+  }
+
+  $id('toggleZapretUpdates').onchange = async (e) => {
+    if (!state.activeVersion) return;
+    const enabled = e.target.checked;
+    try {
+      await invoke('toggle_zapret_update_check', { versionPath: state.activeVersion.path, enabled });
+      showToast('Проверка обновлений Zapret ' + (enabled ? 'включена' : 'выключена') + '.', 'success');
+    } catch (err) {
+      e.target.checked = !enabled;
+      showToast('Не удалось изменить настройку: ' + err, 'error');
+    }
+  };
+
+  $id('toggleAppUpdates').onchange = async (e) => {
+    state.autoCheckUpdates = e.target.checked;
+    await persistConfig();
+    // Включили — проверка через 2 секунды; выключили — таймер снимается.
+    scheduleAppUpdateCheck();
+    showToast(
+      state.autoCheckUpdates
+        ? 'Автопроверка обновлений Zapret Tools включена.'
+        : 'Автопроверка обновлений Zapret Tools выключена.',
+      state.autoCheckUpdates ? 'success' : 'info'
+    );
   };
 
   async function loadListsTab() {
@@ -1538,7 +1889,7 @@
         showToast('Ошибка обновления: ' + e, 'error');
       } finally {
         updateZapretBtn.disabled = false;
-        $id('updateZapretLabel').textContent = 'Проверить обновление';
+        $id('updateZapretLabel').textContent = 'Обновить Zapret';
       }
     };
   }
@@ -1604,7 +1955,8 @@
       active_version: state.activeVersion ? state.activeVersion.name : null,
       switcher_enabled: state.switcherEnabled,
       switcher_exclusions: state.switcherExclusions.slice(),
-      switcher_word_exclusions: state.switcherWordExclusions.slice()
+      switcher_word_exclusions: state.switcherWordExclusions.slice(),
+      auto_check_updates: state.autoCheckUpdates
     };
   }
 

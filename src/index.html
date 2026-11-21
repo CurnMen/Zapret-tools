@@ -213,6 +213,7 @@
     .btn.is-busy .icon { display: none; }
 
     /* Log */
+    .diag-log { height: 460px; max-height: none; margin: 0; white-space: pre-wrap; word-break: break-word; }
     .log { flex: none; max-height: 160px; padding: 9px 12px; overflow-y: auto; background: var(--input); border: 1px solid var(--line); border-radius: var(--radius-md); font: 400 12px/18px var(--font-mono); color: var(--text-2); }
     .log:empty { display: none; }
     .log-line { display: flex; gap: 8px; padding: 1px 0; }
@@ -583,6 +584,10 @@
       <svg class="icon"><use href="#i-play"></use></svg>
       Инструменты
     </button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="tab-diagnostics" data-tab="diagnostics">
+      <svg class="icon"><use href="#i-alert"></use></svg>
+      Диагностика
+    </button>
   </div>
 
   <div id="tab-lists" class="tab-content active" role="tabpanel">
@@ -875,6 +880,7 @@
               <svg class="icon select-chevron"><use href="#i-chevron-down"></use></svg>
             </div>
             <button id="dnsRefreshBtn" class="btn btn-secondary" type="button" title="Обновить список подключений">
+              <span class="spinner btn-spinner" id="dnsRefreshSpinner" hidden></span>
               <svg class="icon"><use href="#i-refresh"></use></svg>
               Обновить
             </button>
@@ -1016,6 +1022,37 @@
         </div>
         <div class="exception-list" id="toolsList"></div>
         <p class="hint">Запуск выполняется с рабочей папкой сборки. «Остановить» завершает процесс, запущенный из этой папки.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-diagnostics" class="tab-content" role="tabpanel">
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 class="section-title">Диагностика</h2>
+          <p class="section-desc">Последние события свитчера: исправления, ошибки буфера, сбои перехвата клавиатуры</p>
+        </div>
+        <div class="inline-field actions-wrap">
+          <button id="diagRefreshBtn" class="btn btn-secondary" type="button">
+            <span class="spinner btn-spinner" id="diagSpinner" hidden></span>
+            <svg class="icon"><use href="#i-refresh"></use></svg>
+            Обновить
+          </button>
+          <button id="diagOpenBtn" class="btn btn-secondary" type="button" title="Открыть папку с логом">
+            <svg class="icon"><use href="#i-folder-open"></use></svg>
+            Открыть лог
+          </button>
+          <button id="diagCopyBtn" class="btn btn-secondary" type="button" title="Скопировать весь текст в буфер обмена">
+            <svg class="icon"><use href="#i-list"></use></svg>
+            Копировать
+          </button>
+        </div>
+      </div>
+
+      <div class="switcher-body">
+        <pre id="diagLog" class="log diag-log">Загрузка…</pre>
+        <p class="hint">Файл: <code>%TEMP%\zapret-tools-switcher.log</code>. При 2 МБ лог уезжает в <code>.log.1</code>, старая копия заменяется.</p>
       </div>
     </div>
   </div>
@@ -2790,13 +2827,70 @@
   }
 
   async function loadNetworkTab() {
-    // Оба вызова — отдельные процессы PowerShell (до 4 с каждый). Раньше они
-    // шли строго друг за другом, и вкладка открывалась секундами дольше.
-    await Promise.all([refreshDnsInterfaces(), syncQuicState()]);
-    syncDnsCustomVisibility();
+    const select = $id('dnsInterface');
+    const hint = $id('dnsCurrent');
+    const refreshBtn = $id('dnsRefreshBtn');
+    const spinner = $id('dnsRefreshSpinner');
+    // Оба вызова — отдельные процессы PowerShell (до 4 с каждый): без индикации
+    // вкладка выглядит пустой и кажется, что кнопки не работают.
+    if (select) select.disabled = true;
+    if (refreshBtn) refreshBtn.disabled = true;
+    if (spinner) spinner.hidden = false;
+    if (hint) hint.textContent = 'Текущие DNS: загрузка…';
+    try {
+      await Promise.all([refreshDnsInterfaces(), syncQuicState()]);
+    } catch (e) {
+      // Раньше reject уходил в unhandled rejection и поля оставались без данных.
+      if (hint) hint.textContent = 'Текущие DNS: не удалось получить';
+      showToast('Не удалось загрузить настройки сети: ' + e, 'error');
+    } finally {
+      if (select) select.disabled = false;
+      if (refreshBtn) refreshBtn.disabled = false;
+      if (spinner) spinner.hidden = true;
+      syncDnsCustomVisibility();
+    }
   }
 
-  $id('dnsRefreshBtn').onclick = () => refreshDnsInterfaces();
+  async function loadDiagnosticsTab() {
+    const box = $id('diagLog');
+    const spinner = $id('diagSpinner');
+    const button = $id('diagRefreshBtn');
+    if (!box) return;
+    if (button) button.disabled = true;
+    if (spinner) spinner.hidden = false;
+    try {
+      const lines = await invoke('get_log_tail', { lines: 200 });
+      box.textContent = Array.isArray(lines) && lines.length
+        ? lines.join('\n')
+        : 'Лог пуст: свитчер ещё не запускался или событий не было.';
+      box.scrollTop = box.scrollHeight;
+    } catch (e) {
+      box.textContent = 'Не удалось прочитать лог: ' + e;
+    } finally {
+      if (button) button.disabled = false;
+      if (spinner) spinner.hidden = true;
+    }
+  }
+
+  $id('diagRefreshBtn').onclick = () => loadDiagnosticsTab();
+  $id('diagOpenBtn').onclick = async () => {
+    try {
+      await invoke('open_switcher_log');
+    } catch (e) {
+      showToast(String(e), 'error');
+    }
+  };
+  $id('diagCopyBtn').onclick = async () => {
+    const text = $id('diagLog')?.textContent || '';
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('Лог скопирован в буфер обмена', 'success');
+    } catch {
+      showToast('Не удалось скопировать: выделите текст вручную', 'error');
+    }
+  };
+
+  $id('dnsRefreshBtn').onclick = () => loadNetworkTab();
   $id('dnsInterface').onchange = () => refreshDnsState();
   $id('dnsPreset').onchange = () => syncDnsCustomVisibility();
 
@@ -3217,6 +3311,7 @@
       if (tab.dataset.tab === 'network') loadNetworkTab();
       if (tab.dataset.tab === 'hosts') loadHostsTab();
       if (tab.dataset.tab === 'tools') loadToolsTab();
+      if (tab.dataset.tab === 'diagnostics') loadDiagnosticsTab();
     };
   });
 

@@ -2600,6 +2600,47 @@ fn rotate_log(path: &Path) {
     let _ = fs::rename(path, &backup);
 }
 
+/// Путь к логу свитчера: один источник для записи и для чтения.
+fn log_path() -> PathBuf {
+    std::env::temp_dir().join("zapret-tools-switcher.log")
+}
+
+/// Последние строки лога для вкладки «Диагностика».
+#[tauri::command]
+async fn get_log_tail(lines: usize) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = log_path();
+        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Старые сборки могли писать не-UTF-8: терять весь лог из-за одной
+        // строки нельзя.
+        let text = String::from_utf8_lossy(&bytes);
+        let mut tail: Vec<String> = text
+            .lines()
+            .rev()
+            .take(lines.clamp(1, 500))
+            .map(str::to_string)
+            .collect();
+        tail.reverse();
+        Ok(tail)
+    })
+    .await
+    .map_err(|err| format!("не удалось прочитать лог: {err}"))?
+}
+
+/// Открывает папку с логом и выделяет сам файл.
+#[tauri::command]
+fn open_switcher_log() -> Result<(), String> {
+    let path = log_path();
+    if !path.exists() {
+        return Err("Лог пока пуст: свитчер ещё не запускался.".into());
+    }
+    Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Диагностика свитчера. В GUI-сборке stderr никуда не выводится,
 /// поэтому параллельно пишем файл в TEMP.
 fn switcher_log(message: impl AsRef<str>) {
@@ -2615,7 +2656,7 @@ fn switcher_log(message: impl AsRef<str>) {
     // (в логе видны склеенные строки с двумя таймстампами).
     static LOG_LOCK: Mutex<()> = Mutex::new(());
 
-    let path = LOG_PATH.get_or_init(|| std::env::temp_dir().join("zapret-tools-switcher.log"));
+    let path = LOG_PATH.get_or_init(log_path);
     // Отравленный мьютекс не повод терять сообщение: логирование продолжается.
     let _guard = LOG_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     // Строку собираем целиком и пишем одним write_all — тогда даже короткая
@@ -4796,6 +4837,7 @@ pub fn run() {
             run_blockcheck, save_blockcheck_strategy,
             list_network_interfaces, get_dns_state, set_dns, reset_dns,
             toggle_quic_block, get_quic_block_state,
+            get_log_tail, open_switcher_log,
             read_hosts, update_hosts, auto_update_hosts, run_zapret_tests,
             list_tools, start_tool, stop_tool, find_tool_processes
         ])

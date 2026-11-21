@@ -2515,14 +2515,26 @@ fn ensure_keyboard_layout(_to_russian: bool) {}
 /// Диагностика свитчера. В GUI-сборке stderr никуда не выводится,
 /// поэтому параллельно пишем файл в TEMP.
 fn switcher_log(message: impl AsRef<str>) {
+    use std::io::Write;
+    use std::sync::Mutex;
+
     let message = message.as_ref();
     eprintln!("switcher: {message}");
 
     static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+    // Сообщения приходят из хука, из рабочих потоков правки и из потоков
+    // восстановления буфера. Без блокировки части строк перемешивались в файле
+    // (в логе видны склеенные строки с двумя таймстампами).
+    static LOG_LOCK: Mutex<()> = Mutex::new(());
+
     let path = LOG_PATH.get_or_init(|| std::env::temp_dir().join("zapret-tools-switcher.log"));
+    // Отравленный мьютекс не повод терять сообщение: логирование продолжается.
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    // Строку собираем целиком и пишем одним write_all — тогда даже короткая
+    // запись одной ниткой не вклинится в середину чужой.
+    let line = format!("[{}] {message}\n", now_ms());
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        use std::io::Write;
-        let _ = writeln!(file, "[{}] {message}", now_ms());
+        let _ = file.write_all(line.as_bytes());
     }
 }
 

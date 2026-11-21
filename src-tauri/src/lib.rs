@@ -3153,7 +3153,20 @@ fn doh_template_for(ip: &str) -> Option<&'static str> {
 }
 
 #[tauri::command]
-fn list_network_interfaces() -> Vec<String> {
+async fn list_network_interfaces() -> Vec<String> {
+    // Запрос уходит в PowerShell и на холодную занимает секунды. Синхронная
+    // команда выполнялась бы в главном потоке и вешала окно, поэтому работа
+    // уходит в пул блокирующих задач (как в get_running_processes).
+    match tokio::task::spawn_blocking(list_network_interfaces_blocking).await {
+        Ok(names) => names,
+        Err(err) => {
+            switcher_log(format!("сеть: не удалось перечислить интерфейсы: {err}"));
+            Vec::new()
+        }
+    }
+}
+
+fn list_network_interfaces_blocking() -> Vec<String> {
     let script = "Get-NetIPConfiguration -ErrorAction SilentlyContinue | \
 Where-Object { $_.NetAdapter.Status -eq 'Up' } | \
 Sort-Object InterfaceIndex | ForEach-Object { $_.InterfaceAlias } | Select-Object -Unique";
@@ -3169,10 +3182,17 @@ Sort-Object InterfaceIndex | ForEach-Object { $_.InterfaceAlias } | Select-Objec
 }
 
 #[tauri::command]
-fn get_dns_state(interface_name: String) -> Result<Vec<String>, String> {
+async fn get_dns_state(interface_name: String) -> Result<Vec<String>, String> {
+    match tokio::task::spawn_blocking(move || get_dns_state_blocking(&interface_name)).await {
+        Ok(result) => result,
+        Err(err) => Err(format!("не удалось прочитать DNS: {err}")),
+    }
+}
+
+fn get_dns_state_blocking(interface_name: &str) -> Result<Vec<String>, String> {
     let script = format!(
         "(Get-DnsClientServerAddress -InterfaceAlias {} -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses",
-        ps_quote(&interface_name)
+        ps_quote(interface_name)
     );
     let out = run_powershell(&script)?;
     Ok(out
@@ -3281,7 +3301,17 @@ if ($LASTEXITCODE -ne 0) {{ throw \"Не удалось создать прав�
 }
 
 #[tauri::command]
-fn get_quic_block_state() -> bool {
+async fn get_quic_block_state() -> bool {
+    match tokio::task::spawn_blocking(get_quic_block_state_blocking).await {
+        Ok(enabled) => enabled,
+        Err(err) => {
+            switcher_log(format!("сеть: не удалось проверить правило QUIC: {err}"));
+            false
+        }
+    }
+}
+
+fn get_quic_block_state_blocking() -> bool {
     let script = format!(
         "$rules = @(Get-NetFirewallRule -DisplayName {rule} -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' }}); if ($rules.Count -gt 0) {{ 'YES' }} else {{ 'NO' }}",
         rule = ps_quote(QUIC_RULE_NAME)

@@ -2790,9 +2790,10 @@
   }
 
   async function loadNetworkTab() {
-    await refreshDnsInterfaces();
+    // Оба вызова — отдельные процессы PowerShell (до 4 с каждый). Раньше они
+    // шли строго друг за другом, и вкладка открывалась секундами дольше.
+    await Promise.all([refreshDnsInterfaces(), syncQuicState()]);
     syncDnsCustomVisibility();
-    await syncQuicState();
   }
 
   $id('dnsRefreshBtn').onclick = () => refreshDnsInterfaces();

@@ -99,6 +99,7 @@
     @keyframes filter-ports-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
     .port-field { display: flex; align-items: center; gap: 6px; }
     .port-field[hidden] { display: none; }
+    #dnsCustomFields[hidden] { display: none; }
     .port-label { flex: none; font-size: 11px; line-height: 16px; color: var(--text-3); white-space: nowrap; }
     .input.port-input { width: 118px; height: 30px; padding: 0 8px; flex: none; font: 400 12px/1 var(--font-mono); letter-spacing: 0.02em; }
     .input.port-input.is-invalid { border-color: rgba(224, 108, 117, 0.6); box-shadow: 0 0 0 3px var(--danger-soft); }
@@ -268,6 +269,7 @@
     .inline-field .input { flex: 1; min-width: 0; }
     .inline-field.actions-wrap { flex-wrap: wrap; }
     .inline-field.actions-wrap .btn { flex: none; }
+    .inline-field .select-wrap { flex: 1 1 220px; width: auto; min-width: 0; }
     .process-picker { display: flex; flex-direction: column; gap: 8px; padding: 8px; background: var(--input); border: 1px solid var(--line); border-radius: var(--radius); }
     .process-picker[hidden] { display: none; }
     .process-picker-search { display: flex; align-items: center; gap: 8px; padding: 0 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
@@ -280,6 +282,9 @@
     .process-item:disabled:hover { background: transparent; color: var(--text-2); }
     .process-item > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .process-added { flex: none; font: 400 10px/1 var(--font-ui); color: var(--text-3); }
+    .custom-dict-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .custom-dict-column { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .custom-dict-title { font-size: 11px; line-height: 16px; color: var(--text-3); }
     .exception-list { display: flex; flex-direction: column; gap: 1px; padding: 4px; background: var(--input); border: 1px solid var(--line); border-radius: var(--radius); }
     .exception-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0 4px 0 8px; border-radius: 5px; font: 400 12px/16px var(--font-mono); color: var(--text-2); }
     .exception-row:hover { background: var(--surface-raised); }
@@ -300,6 +305,8 @@
     .toast.is-leaving { animation: toast-out 160ms var(--ease) forwards; }
     .toast-action { margin-left: auto; align-self: center; flex: none; height: 24px; padding: 0 8px; background: transparent; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); color: var(--accent); font: 500 12px/1 var(--font-ui); cursor: pointer; transition: border-color 140ms var(--ease), background 140ms var(--ease); }
     .toast-action:hover { border-color: var(--accent); background: rgba(203, 166, 247, 0.08); }
+    .toast-cancel { margin-left: 0; color: var(--text-3); }
+    .toast-cancel:hover { border-color: var(--text-3); background: transparent; }
 
     /* Modal */
     .modal { position: fixed; inset: 0; z-index: 1000; display: none; place-items: center; padding: 24px; background: rgba(4, 6, 10, 0.72); backdrop-filter: blur(3px); }
@@ -564,6 +571,18 @@
       <svg class="icon"><use href="#i-keyboard"></use></svg>
       Свитчер
     </button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="tab-network" data-tab="network">
+      <svg class="icon"><use href="#i-settings"></use></svg>
+      Сеть
+    </button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="tab-hosts" data-tab="hosts">
+      <svg class="icon"><use href="#i-list"></use></svg>
+      Hosts
+    </button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="tab-tools" data-tab="tools">
+      <svg class="icon"><use href="#i-play"></use></svg>
+      Инструменты
+    </button>
   </div>
 
   <div id="tab-lists" class="tab-content active" role="tabpanel">
@@ -702,8 +721,25 @@
         Сканировать
       </button>
     </div>
-    <div class="versions-list" id="versionsList"></div>
-  </div>
+      <div class="versions-list" id="versionsList"></div>
+      <div class="section-bar" style="margin-top:16px;">
+        <div>
+          <h2 class="section-title">Авто-подбор стратегии</h2>
+          <p class="section-desc">Запуск blockcheck.cmd из папки blockcheck активной сборки</p>
+        </div>
+        <div class="inline-field actions-wrap">
+          <button id="runZapretTestsBtn" class="btn btn-secondary" type="button">
+            <span class="spinner btn-spinner" id="zapretTestsSpinner" hidden></span>
+            <svg class="icon"><use href="#i-play"></use></svg>
+            <span id="zapretTestsLabel">Запустить тесты Zapret</span>
+          </button>
+          <button id="blockcheckBtn" class="btn btn-secondary" type="button">
+            <svg class="icon"><use href="#i-stethoscope"></use></svg>
+            Авто-подбор (Blockcheck)
+          </button>
+        </div>
+      </div>
+    </div>
 
   <div id="tab-trash" class="tab-content" role="tabpanel">
     <div class="section-bar">
@@ -780,10 +816,206 @@
           <p class="hint">Эти слова свитчер не исправляет. Если автозамена ошиблась, нажмите Backspace дважды сразу после неё — появится предложение добавить слово сюда.</p>
         </div>
 
+        <div class="field">
+          <span class="field-label">Пользовательский словарь</span>
+          <p class="hint">Слова, которых нет в базовых словарях. После Double Shift программа предложит добавить переведённую пару; добавленные слова участвуют в автозамене.</p>
+          <div class="custom-dict-grid">
+            <div class="custom-dict-column">
+              <span class="custom-dict-title">Русские слова</span>
+              <div class="inline-field actions-wrap">
+                <input class="input" type="text" id="customDictRuInput" placeholder="Русское слово" autocomplete="off">
+                <button class="btn btn-secondary" type="button" id="customDictRuAdd">
+                  <svg class="icon"><use href="#i-plus"></use></svg>
+                  Добавить
+                </button>
+              </div>
+              <div class="exception-list" id="customDictRuList"></div>
+            </div>
+            <div class="custom-dict-column">
+              <span class="custom-dict-title">Английские слова</span>
+              <div class="inline-field actions-wrap">
+                <input class="input" type="text" id="customDictEnInput" placeholder="English word" autocomplete="off">
+                <button class="btn btn-secondary" type="button" id="customDictEnAdd">
+                  <svg class="icon"><use href="#i-plus"></use></svg>
+                  Добавить
+                </button>
+              </div>
+              <div class="exception-list" id="customDictEnList"></div>
+            </div>
+          </div>
+          <div class="inline-field actions-wrap" style="align-items:center;">
+            <button class="btn btn-ghost btn-sm" type="button" id="clearDeclinedWordsBtn">Сбросить отклонённые предложения</button>
+            <span class="hint" id="declinedWordsHint">Отклонённых предложений: 0</span>
+          </div>
+        </div>
+
         <div class="notice">
           <svg class="icon"><use href="#i-alert"></use></svg>
           <span id="switcherNotice">Свитчер выключен. Включите его, чтобы слова, набранные не в той раскладке, исправлялись автоматически.</span>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-network" class="tab-content" role="tabpanel">
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 class="section-title">DNS и DoH</h2>
+          <p class="section-desc">Смена DNS-серверов для выбранного сетевого подключения</p>
+        </div>
+      </div>
+
+      <div class="switcher-body">
+        <div class="field">
+          <label class="field-label" for="dnsInterface">Сетевое подключение</label>
+          <div class="inline-field actions-wrap">
+            <div class="select-wrap">
+              <select id="dnsInterface" aria-label="Сетевое подключение"></select>
+              <svg class="icon select-chevron"><use href="#i-chevron-down"></use></svg>
+            </div>
+            <button id="dnsRefreshBtn" class="btn btn-secondary" type="button" title="Обновить список подключений">
+              <svg class="icon"><use href="#i-refresh"></use></svg>
+              Обновить
+            </button>
+          </div>
+          <p class="hint" id="dnsCurrent">Текущие DNS: —</p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="dnsPreset">DNS-сервер</label>
+          <div class="select-wrap">
+            <select id="dnsPreset" aria-label="DNS-сервер">
+              <option value="cloudflare">Cloudflare (1.1.1.1)</option>
+              <option value="google">Google (8.8.8.8)</option>
+              <option value="quad9">Quad9 (9.9.9.9)</option>
+              <option value="adguard">AdGuard (94.140.14.14)</option>
+              <option value="custom">Свой DNS…</option>
+            </select>
+            <svg class="icon select-chevron"><use href="#i-chevron-down"></use></svg>
+          </div>
+        </div>
+
+        <div class="field" id="dnsCustomFields" hidden>
+          <label class="field-label" for="dnsCustom1">Свои DNS-серверы</label>
+          <div class="inline-field actions-wrap">
+            <input class="input" type="text" id="dnsCustom1" placeholder="Основной, например 1.1.1.1" autocomplete="off" inputmode="decimal">
+            <input class="input" type="text" id="dnsCustom2" placeholder="Дополнительный (необязательно)" autocomplete="off" inputmode="decimal">
+          </div>
+          <p class="hint">Можно указать IPv4 или IPv6. DoH подключается автоматически только для известных серверов (Cloudflare, Google, Quad9, AdGuard).</p>
+        </div>
+
+        <label class="switch">
+          <input type="checkbox" id="dnsDoh">
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          <span>Использовать DoH (если поддерживается)</span>
+        </label>
+
+        <p class="hint">Для маршрутизации конкретных доменов используйте AdGuard Home или dnsmasq.</p>
+
+        <div class="inline-field actions-wrap">
+          <button id="dnsApplyBtn" class="btn btn-primary" type="button">
+            <span class="spinner btn-spinner" id="dnsSpinner" hidden></span>
+            Применить
+          </button>
+          <button id="dnsResetBtn" class="btn btn-secondary" type="button">
+            <svg class="icon"><use href="#i-rotate"></use></svg>
+            Сбросить на автоматический
+          </button>
+        </div>
+
+        <div class="notice">
+          <svg class="icon"><use href="#i-alert"></use></svg>
+          <span>Изменение DNS требует прав администратора — Windows покажет запрос UAC. Сброс возвращает настройки роутера (DHCP).</span>
+        </div>
+
+        <div class="section-bar" style="margin:0;">
+          <div>
+            <h2 class="section-title">Блокировка QUIC</h2>
+            <p class="section-desc">Правило брандмауэра: UDP 80/443 наружу (помогает, когда сайты грузятся по QUIC в обход Zapret)</p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="quicBlock">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            <span id="quicBlockLabel">Выключено</span>
+          </label>
+        </div>
+
+        <div id="networkLog" class="log"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-hosts" class="tab-content" role="tabpanel">
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 class="section-title">Hosts</h2>
+          <p class="section-desc">Записи Zapret Tools в системном файле hosts</p>
+        </div>
+        <button id="hostsReloadBtn" class="btn btn-secondary" type="button" title="Перечитать hosts">
+          <svg class="icon"><use href="#i-refresh"></use></svg>
+          Обновить
+        </button>
+      </div>
+
+      <div class="switcher-body">
+        <div class="field">
+          <label class="field-label" for="hostsEntry">Новая запись</label>
+          <div class="inline-field actions-wrap">
+            <input class="input" type="text" id="hostsEntry" placeholder="1.2.3.4 example.com" autocomplete="off">
+            <button id="hostsAddBtn" class="btn btn-secondary" type="button">
+              <svg class="icon"><use href="#i-plus"></use></svg>
+              Добавить
+            </button>
+          </div>
+          <p class="hint">Формат: IP и один или несколько доменов через пробел. Управляемый блок в файле помечен <code># &gt;&gt;&gt; Zapret Tools</code>.</p>
+        </div>
+
+        <div class="exception-list" id="hostsList"></div>
+
+        <div class="inline-field actions-wrap">
+          <button id="hostsAutoBtn" class="btn btn-secondary" type="button">
+            <span class="spinner btn-spinner" id="hostsAutoSpinner" hidden></span>
+            <svg class="icon"><use href="#i-download"></use></svg>
+            <span id="hostsAutoLabel">Авто-обновить из Zapret</span>
+          </button>
+          <button id="hostsApplyBtn" class="btn btn-primary" type="button">
+            <span class="spinner btn-spinner" id="hostsSpinner" hidden></span>
+            <svg class="icon"><use href="#i-save"></use></svg>
+            <span id="hostsApplyLabel">Применить</span>
+          </button>
+          <span class="hint" id="hostsPath"></span>
+        </div>
+
+        <div class="notice">
+          <svg class="icon"><use href="#i-alert"></use></svg>
+          <span>Запись в hosts требует прав администратора (UAC). Остальные строки файла не изменяются.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-tools" class="tab-content" role="tabpanel">
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 class="section-title">Инструменты</h2>
+          <p class="section-desc">EXE-файлы в папке активной сборки Zapret</p>
+        </div>
+        <button id="toolsRefreshBtn" class="btn btn-secondary" type="button">
+          <svg class="icon"><use href="#i-refresh"></use></svg>
+          Обновить
+        </button>
+      </div>
+
+      <div class="switcher-body">
+        <div class="notice">
+          <svg class="icon"><use href="#i-alert"></use></svg>
+          <span>Здесь появятся сторонние программы для обхода блокировок (ByeDPI, TG WS Proxy), если вы положите их .exe файлы в папку с Zapret.</span>
+        </div>
+        <div class="exception-list" id="toolsList"></div>
+        <p class="hint">Запуск выполняется с рабочей папкой сборки. «Остановить» завершает процесс, запущенный из этой папки.</p>
       </div>
     </div>
   </div>
@@ -811,6 +1043,37 @@
     <div class="modal-actions">
       <button id="confirmNo" class="btn btn-secondary" type="button">Отмена</button>
       <button id="confirmYes" class="btn btn-danger" type="button">Подтвердить</button>
+    </div>
+  </div>
+</div>
+
+<div id="blockcheckModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="blockcheckTitle">
+  <div class="modal-content">
+    <h3 class="modal-title" id="blockcheckTitle">Авто-подбор стратегии (Blockcheck)</h3>
+
+    <div id="blockcheckForm">
+      <p class="modal-text">Укажите домены для проверки. Если в сборке есть <code>blockcheck.cmd</code>, будет запущен он. Иначе программа по очереди запустит .bat-стратегии из корня сборки и проверит доступность доменов. Если стратегий нет, скачайте папку <code>blockcheck</code> с GitHub bol-van и положите её в папку с Zapret.</p>
+      <div class="field">
+        <label class="field-label" for="blockcheckDomains">Домены (через запятую)</label>
+        <input class="input" type="text" id="blockcheckDomains" value="youtube.com, discord.com" autocomplete="off">
+      </div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button id="blockcheckCancel" class="btn btn-secondary" type="button">Отмена</button>
+        <button id="blockcheckStart" class="btn btn-primary" type="button">
+          <svg class="icon"><use href="#i-stethoscope"></use></svg>
+          Запустить
+        </button>
+      </div>
+    </div>
+
+    <div id="blockcheckProgress" hidden>
+      <div class="inline-field" style="align-items:center;">
+        <span class="spinner"></span>
+        <span class="modal-text" style="margin:0;">Проверка выполняется, это может занять несколько минут…</span>
+      </div>
+      <div class="modal-actions" style="margin-top:16px;">
+        <button id="blockcheckClose" class="btn btn-secondary" type="button">Свернуть в консоль</button>
+      </div>
     </div>
   </div>
 </div>
@@ -895,7 +1158,8 @@
     toast.className = 'toast toast-' + (type === 'success' || type === 'error' ? type : 'info');
     toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
     toast.textContent = String(message);
-    toast.addEventListener('click', () => dismissToast(toast));
+    toast.addEventListener('click', () => dismissToast(toast, 'dismiss'));
+    if (typeof options?.onDismiss === 'function') toast.__onDismiss = options.onDismiss;
 
     if (options?.actionLabel && typeof options.onAction === 'function') {
       const action = document.createElement('button');
@@ -904,20 +1168,37 @@
       action.textContent = options.actionLabel;
       action.addEventListener('click', (event) => {
         event.stopPropagation();
-        dismissToast(toast);
+        dismissToast(toast, 'action');
         options.onAction();
       });
       toast.appendChild(action);
     }
 
+    if (options?.cancelLabel) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'toast-action toast-cancel';
+      cancel.textContent = options.cancelLabel;
+      cancel.addEventListener('click', (event) => {
+        event.stopPropagation();
+        dismissToast(toast, 'dismiss');
+      });
+      toast.appendChild(cancel);
+    }
+
     host.appendChild(toast);
     while (host.children.length > 4) host.firstElementChild.remove();
-    setTimeout(() => dismissToast(toast), options?.timeout ?? 4200);
+    setTimeout(() => dismissToast(toast, 'timeout'), options?.timeout ?? 4200);
   }
 
-  function dismissToast(toast) {
+  function dismissToast(toast, reason = 'dismiss') {
     if (!toast || !toast.isConnected || toast.classList.contains('is-leaving')) return;
     toast.classList.add('is-leaving');
+    if (reason === 'dismiss' && typeof toast.__onDismiss === 'function') {
+      const callback = toast.__onDismiss;
+      toast.__onDismiss = null;
+      try { callback(); } catch (_) { /* отказ не должен ломать UI */ }
+    }
     setTimeout(() => toast.remove(), 180);
   }
 
@@ -991,7 +1272,7 @@
 
   restoreWindowGeometry().then(watchWindowGeometry);
 
-  let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null, trashFiles: [], switcherEnabled: false, switcherExclusions: [], switcherWordExclusions: [], switcherDictionariesReady: false, switcherAdmin: true, switcherAdminWarned: false, switcherEventsBound: false, switcherProcesses: [], autoCheckUpdates: true };
+  let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null, trashFiles: [], switcherEnabled: false, switcherExclusions: [], switcherWordExclusions: [], customDictRu: [], customDictEn: [], declinedWords: [], switcherDictionariesReady: false, switcherAdmin: true, switcherAdminWarned: false, switcherEventsBound: false, switcherProcesses: [], autoCheckUpdates: true, hostsEntries: [], tools: [], toolProcesses: [] };
 
   function setAutostartUI(on) {
     $id('btnAutostartLabel').textContent = on ? 'Автозапуск: вкл' : 'Автозапуск: выкл';
@@ -1063,6 +1344,18 @@
   // «Авто-проверка Zapret Tools» через scheduleAppUpdateCheck().
   let appUpdateInFlight = false;
 
+  // Не даёт сетевому запросу подвесить интерфейс: плагин updater не всегда
+  // возвращает управление, если GitHub не отвечает.
+  function withTimeout(promise, ms, message) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(message)), ms);
+      promise.then(
+        value => { clearTimeout(timer); resolve(value); },
+        error => { clearTimeout(timer); reject(error); }
+      );
+    });
+  }
+
   // silent = true — фоновая автопроверка: молчим, если обновлений нет
   // и если репозиторий недоступен, чтобы не мешать при старте.
   async function runAppUpdateCheck({ silent = false } = {}) {
@@ -1072,7 +1365,11 @@
     appUpdateInFlight = true;
 
     try {
-      const update = await invoke('plugin:updater|check');
+      const update = await withTimeout(
+        invoke('plugin:updater|check'),
+        5000,
+        'Сервер не отвечает'
+      );
       if (update && update.version) {
         showToast(`Доступна новая версия Zapret Tools ${update.version}.`, 'info', { timeout: 9000 });
       } else if (!silent) {
@@ -1081,6 +1378,10 @@
     } catch (err) {
       if (silent) return;
       const text = String(err && err.message ? err.message : err);
+      if (text.includes('Сервер не отвечает')) {
+        showToast('Сервер не отвечает', 'error');
+        return;
+      }
       // Плагин не отдаёт HTTP-код: 403/404 приватного репозитория он превращает
       // в «Could not fetch a valid release JSON from the remote» (ReleaseNotFound).
       const isPrivate = /could not fetch a valid release json|releasenotfound|\b(403|404)\b|forbidden|not found|private|unauthorized|authentication/i.test(text);
@@ -1865,7 +2166,11 @@
       $id('updateZapretLabel').textContent = 'Проверка версии';
 
       try {
-        const [local, remote] = await invoke('check_zapret_version', { versionPath: state.activeVersion.path });
+        const [local, remote] = await withTimeout(
+          invoke('check_zapret_version', { versionPath: state.activeVersion.path }),
+          5000,
+          'Сервер не отвечает'
+        );
 
         if (local === remote) {
           showToast(`У вас самая свежая версия: ${local}`, 'success');
@@ -1945,6 +2250,32 @@
         </button>
       </div>`).join('');
     }
+
+    renderCustomDictList('customDictRuList', state.customDictRu, 'ru');
+    renderCustomDictList('customDictEnList', state.customDictEn, 'en');
+
+    const declinedHint = $id('declinedWordsHint');
+    if (declinedHint) {
+      declinedHint.textContent = `Отклонённых предложений: ${state.declinedWords.length}`;
+    }
+    const clearDeclined = $id('clearDeclinedWordsBtn');
+    if (clearDeclined) clearDeclined.disabled = state.declinedWords.length === 0;
+  }
+
+  function renderCustomDictList(containerId, words, language) {
+    const list = $id(containerId);
+    if (!list) return;
+    if (!words.length) {
+      list.innerHTML = '<div class="exception-empty">Слов нет</div>';
+      return;
+    }
+    list.innerHTML = words.map((word, index) => `
+      <div class="exception-row">
+        <span>${escapeHtml(word)}</span>
+        <button class="icon-btn" type="button" data-custom-word="${escapeHtml(word)}" data-custom-language="${language}" aria-label="Удалить слово из словаря">
+          <svg class="icon"><use href="#i-x"></use></svg>
+        </button>
+      </div>`).join('');
   }
 
   // Полный объект конфига: save_config перезаписывает файл целиком,
@@ -1956,6 +2287,9 @@
       switcher_enabled: state.switcherEnabled,
       switcher_exclusions: state.switcherExclusions.slice(),
       switcher_word_exclusions: state.switcherWordExclusions.slice(),
+      switcher_custom_dict_ru: state.customDictRu.slice(),
+      switcher_custom_dict_en: state.customDictEn.slice(),
+      switcher_declined_words: state.declinedWords.slice(),
       auto_check_updates: state.autoCheckUpdates
     };
   }
@@ -2019,6 +2353,29 @@
         }
       });
     });
+
+    tauriEvent.listen('switcher-suggest-custom-word', (event) => {
+      const payload = event?.payload || {};
+      const original = String(payload.original || '').trim();
+      const translated = String(payload.translated || '').trim();
+      if (!original || !translated) return;
+
+      // to_russian === false означает, что переведённое слово английское.
+      const toRussian = payload.to_russian !== false;
+
+      showToast(`Слово «${original}» переведено. Добавить в словарь?`, 'info', {
+        actionLabel: 'Добавить',
+        cancelLabel: 'Отмена',
+        timeout: 12000,
+        onAction: async () => {
+          if (await addCustomWordPair(original, translated, toRussian)) {
+            showToast(`«${original}» и «${translated}» добавлены в словарь.`, 'success');
+          }
+        },
+        // Закрытие тоста без «Добавить» = отказ: больше не предлагаем.
+        onDismiss: () => { declineCustomWord(original); }
+      });
+    });
   }
 
   async function initSwitcher() {
@@ -2039,6 +2396,15 @@
           : [];
         state.switcherWordExclusions = Array.isArray(config.switcher_word_exclusions)
           ? config.switcher_word_exclusions.slice()
+          : [];
+        state.customDictRu = Array.isArray(config.switcher_custom_dict_ru)
+          ? config.switcher_custom_dict_ru.slice()
+          : [];
+        state.customDictEn = Array.isArray(config.switcher_custom_dict_en)
+          ? config.switcher_custom_dict_en.slice()
+          : [];
+        state.declinedWords = Array.isArray(config.switcher_declined_words)
+          ? config.switcher_declined_words.slice()
           : [];
       }
       if (cfg) {
@@ -2134,6 +2500,82 @@
       await persistConfig();
     } catch (e) {
       showToast('Не удалось удалить слово-исключение: ' + e, 'error');
+    }
+  }
+
+  // ---- Пользовательский словарь и отклонённые предложения ----
+
+  function applyCustomWords(data) {
+    if (!data || typeof data !== 'object') return;
+    if (Array.isArray(data.ru)) state.customDictRu = data.ru.slice();
+    if (Array.isArray(data.en)) state.customDictEn = data.en.slice();
+    if (Array.isArray(data.declined)) state.declinedWords = data.declined.slice();
+    renderSwitcher();
+  }
+
+  async function addCustomWordFromInput(language) {
+    const input = $id(language === 'ru' ? 'customDictRuInput' : 'customDictEnInput');
+    const word = (input?.value || '').trim();
+    if (!word) return;
+    try {
+      const data = await invoke('add_custom_word', { word, language });
+      applyCustomWords(data);
+      input.value = '';
+      await persistConfig();
+      showToast(`Слово «${word}» добавлено в словарь.`, 'success');
+    } catch (e) {
+      showToast('Не удалось добавить слово: ' + e, 'error');
+    }
+  }
+
+  async function removeCustomWord(language, word) {
+    try {
+      const data = await invoke('remove_custom_word', { word, language });
+      applyCustomWords(data);
+      await persistConfig();
+    } catch (e) {
+      showToast('Не удалось удалить слово: ' + e, 'error');
+    }
+  }
+
+  /// Добавляет пару «исходное — переведённое» в словари обоих языков.
+  async function addCustomWordPair(original, translated, toRussian) {
+    const target = toRussian ? 'ru' : 'en';
+    const source = toRussian ? 'en' : 'ru';
+    try {
+      await invoke('add_custom_word', { word: translated, language: target });
+      const data = await invoke('add_custom_word', { word: original, language: source });
+      applyCustomWords(data);
+      await persistConfig();
+      return true;
+    } catch (e) {
+      showToast('Не удалось добавить слова в словарь: ' + e, 'error');
+      return false;
+    }
+  }
+
+  async function declineCustomWord(word) {
+    const value = String(word || '').trim();
+    if (!value) return;
+    try {
+      const updated = await invoke('decline_custom_word', { word: value });
+      state.declinedWords = Array.isArray(updated) ? updated : state.declinedWords;
+      renderSwitcher();
+      await persistConfig();
+    } catch (e) {
+      showToast('Не удалось сохранить отказ: ' + e, 'error');
+    }
+  }
+
+  async function clearDeclinedWords() {
+    try {
+      const updated = await invoke('clear_declined_words');
+      state.declinedWords = Array.isArray(updated) ? updated : [];
+      renderSwitcher();
+      await persistConfig();
+      showToast('Список отклонённых предложений очищен.', 'success');
+    } catch (e) {
+      showToast('Не удалось очистить список: ' + e, 'error');
     }
   }
 
@@ -2260,6 +2702,505 @@
     if (word) await removeSwitcherWordExclusion(word);
   });
 
+  // ---- Пользовательский словарь ----
+  $id('customDictRuAdd').onclick = () => addCustomWordFromInput('ru');
+  $id('customDictEnAdd').onclick = () => addCustomWordFromInput('en');
+  $id('customDictRuInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addCustomWordFromInput('ru');
+    }
+  });
+  $id('customDictEnInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addCustomWordFromInput('en');
+    }
+  });
+  const handleCustomDictRemove = async (event) => {
+    const btn = event.target.closest('[data-custom-word]');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    await removeCustomWord(btn.dataset.customLanguage, btn.dataset.customWord);
+  };
+  $id('customDictRuList').addEventListener('click', handleCustomDictRemove);
+  $id('customDictEnList').addEventListener('click', handleCustomDictRemove);
+  $id('clearDeclinedWordsBtn').onclick = () => clearDeclinedWords();
+
+  // ---- Сеть: DNS, DoH и блокировка QUIC ----
+  const DNS_PRESETS = {
+    cloudflare: { dns1: '1.1.1.1', dns2: '1.0.0.1', name: 'Cloudflare' },
+    google: { dns1: '8.8.8.8', dns2: '8.8.4.4', name: 'Google' },
+    quad9: { dns1: '9.9.9.9', dns2: '149.112.112.112', name: 'Quad9' },
+    adguard: { dns1: '94.140.14.14', dns2: '94.140.15.15', name: 'AdGuard' }
+  };
+
+  function isValidDnsAddress(value) {
+    const text = String(value || '').trim();
+    if (!text) return false;
+    if (text.includes(':')) return /^[0-9a-fA-F:]+$/.test(text);
+    const parts = text.split('.');
+    return parts.length === 4
+      && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+  }
+
+  function syncDnsCustomVisibility() {
+    const custom = $id('dnsPreset').value === 'custom';
+    $id('dnsCustomFields').hidden = !custom;
+    if (custom) $id('dnsCustom1').focus();
+  }
+
+  async function refreshDnsInterfaces(preferred) {
+    const select = $id('dnsInterface');
+    if (!select) return;
+    let interfaces = [];
+    try { interfaces = await invoke('list_network_interfaces'); } catch { interfaces = []; }
+    if (!Array.isArray(interfaces) || !interfaces.length) interfaces = ['Ethernet', 'Wi-Fi'];
+
+    const previous = preferred || select.value;
+    select.innerHTML = interfaces
+      .map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)
+      .join('');
+    if (previous && interfaces.includes(previous)) select.value = previous;
+    await refreshDnsState();
+  }
+
+  async function refreshDnsState() {
+    const select = $id('dnsInterface');
+    const label = $id('dnsCurrent');
+    if (!select || !label) return;
+    const name = select.value;
+    if (!name) { label.textContent = 'Текущие DNS: —'; return; }
+    try {
+      const servers = await invoke('get_dns_state', { interfaceName: name });
+      label.textContent = Array.isArray(servers) && servers.length
+        ? `Текущие DNS: ${servers.join(', ')}`
+        : 'Текущие DNS: автоматически (DHCP)';
+    } catch {
+      label.textContent = 'Текущие DNS: не удалось получить';
+    }
+  }
+
+  async function syncQuicState() {
+    try {
+      const enabled = await invoke('get_quic_block_state');
+      $id('quicBlock').checked = !!enabled;
+      $id('quicBlockLabel').textContent = enabled ? 'Включено' : 'Выключено';
+    } catch { /* состояние недоступно — оставляем как есть */ }
+  }
+
+  async function loadNetworkTab() {
+    await refreshDnsInterfaces();
+    syncDnsCustomVisibility();
+    await syncQuicState();
+  }
+
+  $id('dnsRefreshBtn').onclick = () => refreshDnsInterfaces();
+  $id('dnsInterface').onchange = () => refreshDnsState();
+  $id('dnsPreset').onchange = () => syncDnsCustomVisibility();
+
+  $id('dnsApplyBtn').onclick = async () => {
+    const interfaceName = $id('dnsInterface').value;
+    if (!interfaceName) return showToast('Выберите сетевое подключение', 'error');
+
+    const presetKey = $id('dnsPreset').value;
+    const doh = $id('dnsDoh').checked;
+    let dns1;
+    let dns2;
+    let presetName;
+
+    if (presetKey === 'custom') {
+      dns1 = ($id('dnsCustom1').value || '').trim();
+      dns2 = ($id('dnsCustom2').value || '').trim();
+      if (!isValidDnsAddress(dns1)) {
+        return showToast('Укажите корректный основной DNS, например 1.1.1.1', 'error');
+      }
+      if (dns2 && !isValidDnsAddress(dns2)) {
+        return showToast('Дополнительный DNS указан неверно', 'error');
+      }
+      presetName = 'Свой DNS';
+    } else {
+      const preset = DNS_PRESETS[presetKey] || DNS_PRESETS.cloudflare;
+      dns1 = preset.dns1;
+      dns2 = preset.dns2;
+      presetName = preset.name;
+    }
+
+    const button = $id('dnsApplyBtn');
+    const spinner = $id('dnsSpinner');
+    button.disabled = true;
+    spinner.hidden = false;
+    try {
+      await invoke('set_dns', { interfaceName, dns1, dns2: dns2 || null, doh });
+      showToast(`DNS ${presetName} применён${doh ? ' (DoH)' : ''}`, 'success');
+      logTo($id('networkLog'), `DNS ${escapeHtml(presetName)}: ${escapeHtml(dns1)}${dns2 ? ', ' + escapeHtml(dns2) : ''}${doh ? ' + DoH' : ''}`, 'ok');
+      await refreshDnsState();
+    } catch (e) {
+      showToast('Не удалось изменить DNS: ' + e, 'error');
+    } finally {
+      button.disabled = false;
+      spinner.hidden = true;
+    }
+  };
+
+  $id('dnsResetBtn').onclick = async () => {
+    const interfaceName = $id('dnsInterface').value;
+    if (!interfaceName) return showToast('Выберите сетевое подключение', 'error');
+    try {
+      await invoke('reset_dns', { interfaceName });
+      showToast('DNS сброшен на автоматический', 'success');
+      logTo($id('networkLog'), 'DNS сброшен на DHCP', 'ok');
+      await refreshDnsState();
+    } catch (e) {
+      showToast('Не удалось сбросить DNS: ' + e, 'error');
+    }
+  };
+
+  $id('quicBlock').onchange = async (event) => {
+    const enabled = event.target.checked;
+    const input = event.target;
+    const label = $id('quicBlockLabel');
+    input.disabled = true;
+    label.textContent = enabled ? 'Включаем…' : 'Выключаем…';
+    try {
+      await invoke('toggle_quic_block', { enable: enabled });
+      label.textContent = enabled ? 'Включено' : 'Выключено';
+      showToast(enabled ? 'QUIC заблокирован (UDP 80/443)' : 'Блокировка QUIC снята', 'success');
+      logTo($id('networkLog'), enabled ? 'Правило брандмауэра QUIC добавлено' : 'Правило брандмауэра QUIC удалено', 'ok');
+    } catch (e) {
+      input.checked = !enabled;
+      label.textContent = enabled ? 'Выключено' : 'Включено';
+      showToast('Не удалось изменить правило: ' + e, 'error');
+    } finally {
+      input.disabled = false;
+    }
+  };
+
+  // ---- Hosts ----
+  function hostsEntryLooksValid(entry) {
+    return /^\s*(?:#.*|[0-9a-fA-F:.%]+\s+\S+.*)$/.test(entry);
+  }
+
+  function renderHosts() {
+    const list = $id('hostsList');
+    if (!list) return;
+    if (!state.hostsEntries.length) {
+      list.innerHTML = '<div class="exception-empty">Записей нет</div>';
+      return;
+    }
+    list.innerHTML = state.hostsEntries.map((entry, index) => `
+      <div class="exception-row">
+        <span>${escapeHtml(entry)}</span>
+        <button class="icon-btn" type="button" data-host-remove="${index}" title="Удалить запись">
+          <svg class="icon"><use href="#i-x"></use></svg>
+        </button>
+      </div>`).join('');
+  }
+
+  function addHostsEntry() {
+    const input = $id('hostsEntry');
+    const value = (input.value || '').trim();
+    if (!value) return;
+    if (!hostsEntryLooksValid(value)) {
+      return showToast('Формат: IP и домен, например 1.2.3.4 example.com', 'error');
+    }
+    if (state.hostsEntries.some(entry => entry.toLowerCase() === value.toLowerCase())) {
+      return showToast('Такая запись уже есть', 'info');
+    }
+    state.hostsEntries.push(value);
+    input.value = '';
+    renderHosts();
+  }
+
+  async function loadHostsTab() {
+    try {
+      const data = await invoke('read_hosts');
+      state.hostsEntries = Array.isArray(data.entries) ? data.entries : [];
+      $id('hostsPath').textContent = data.path || '';
+      renderHosts();
+    } catch (e) {
+      showToast('Не удалось прочитать hosts: ' + e, 'error');
+    }
+  }
+
+  $id('hostsAddBtn').onclick = () => addHostsEntry();
+  $id('hostsEntry').onkeydown = (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); addHostsEntry(); }
+  };
+  $id('hostsList').onclick = (event) => {
+    const button = event.target.closest('[data-host-remove]');
+    if (!button) return;
+    const index = Number(button.dataset.hostRemove);
+    if (!Number.isInteger(index) || index < 0) return;
+    state.hostsEntries.splice(index, 1);
+    renderHosts();
+  };
+  $id('hostsApplyBtn').onclick = async () => {
+    const button = $id('hostsApplyBtn');
+    if (button.disabled) return;
+    const spinner = $id('hostsSpinner');
+    const label = $id('hostsApplyLabel');
+    button.disabled = true;
+    spinner.hidden = false;
+    label.textContent = 'Применение…';
+    try {
+      await invoke('update_hosts', { entries: state.hostsEntries });
+      showToast('hosts обновлён', 'success');
+      await loadHostsTab();
+    } catch (e) {
+      showToast('Не удалось обновить hosts: ' + e, 'error');
+    } finally {
+      button.disabled = false;
+      spinner.hidden = true;
+      label.textContent = 'Применить';
+    }
+  };
+  $id('hostsReloadBtn').onclick = () => loadHostsTab();
+  $id('hostsAutoBtn').onclick = async () => {
+    const button = $id('hostsAutoBtn');
+    if (button.disabled) return;
+    const spinner = $id('hostsAutoSpinner');
+    const label = $id('hostsAutoLabel');
+    button.disabled = true;
+    spinner.hidden = false;
+    label.textContent = 'Обновление…';
+    try {
+      const result = await invoke('auto_update_hosts');
+      showToast(typeof result === 'string' && result ? result : 'hosts обновлён из Zapret', 'success');
+      await loadHostsTab();
+    } catch (e) {
+      showToast('Не удалось авто-обновить hosts: ' + e, 'error');
+    } finally {
+      button.disabled = false;
+      spinner.hidden = true;
+      label.textContent = 'Авто-обновить из Zapret';
+    }
+  };
+
+  // ---- Инструменты ----
+  function renderTools() {
+    const list = $id('toolsList');
+    if (!list) return;
+    if (!state.tools.length) {
+      list.innerHTML = '<div class="exception-empty">В папке сборки нет exe-файлов</div>';
+      return;
+    }
+    list.innerHTML = state.tools.map(name => {
+      const running = state.toolProcesses.filter(p => String(p.name).toLowerCase() === name.toLowerCase());
+      const badge = running.length
+        ? `<span class="vbadge">PID ${running.map(p => p.pid).join(', ')}</span>`
+        : '<span class="vbadge muted">не запущен</span>';
+      const action = running.length
+        ? `<button class="btn btn-danger btn-sm" type="button" data-tool-stop="${running[0].pid}">Остановить</button>`
+        : `<button class="btn btn-secondary btn-sm" type="button" data-tool-start="${escapeHtml(name)}">Запустить</button>`;
+      return `<div class="exception-row"><span>${escapeHtml(name)} ${badge}</span>${action}</div>`;
+    }).join('');
+  }
+
+  async function loadToolsTab() {
+    const list = $id('toolsList');
+    if (!list) return;
+    if (!state.activeVersion) {
+      list.innerHTML = '<div class="exception-empty">Сначала выберите активную версию во вкладке «Версии»</div>';
+      return;
+    }
+    list.innerHTML = '<div class="exception-empty">Загрузка…</div>';
+    try {
+      const [tools, running] = await Promise.all([
+        invoke('list_tools', { versionPath: state.activeVersion.path }),
+        invoke('find_tool_processes', { versionPath: state.activeVersion.path })
+      ]);
+      state.tools = Array.isArray(tools) ? tools : [];
+      state.toolProcesses = Array.isArray(running) ? running : [];
+      renderTools();
+    } catch (e) {
+      list.innerHTML = `<div class="exception-empty error-text">Ошибка: ${escapeHtml(e)}</div>`;
+    }
+  }
+
+  $id('toolsRefreshBtn').onclick = () => loadToolsTab();
+  $id('toolsList').onclick = async (event) => {
+    const startButton = event.target.closest('[data-tool-start]');
+    if (startButton) {
+      if (!state.activeVersion) return;
+      const exeName = startButton.dataset.toolStart;
+      startButton.disabled = true;
+      try {
+        const pid = await invoke('start_tool', { versionPath: state.activeVersion.path, exeName });
+        showToast(`${exeName} запущен (PID ${pid})`, 'success');
+        await loadToolsTab();
+      } catch (e) {
+        startButton.disabled = false;
+        showToast('Не удалось запустить: ' + e, 'error');
+      }
+      return;
+    }
+
+    const stopButton = event.target.closest('[data-tool-stop]');
+    if (stopButton) {
+      const pid = Number(stopButton.dataset.toolStop);
+      if (!Number.isInteger(pid) || pid <= 0) return;
+      stopButton.disabled = true;
+      try {
+        await invoke('stop_tool', { pid });
+        showToast('Процесс остановлен', 'success');
+      } catch (e) {
+        showToast('Не удалось остановить: ' + e, 'error');
+      }
+      await loadToolsTab();
+    }
+  };
+
+  // ---- Blockcheck ----
+  let blockcheckRunning = false;
+
+  function openBlockcheckModal() {
+    if (!state.activeVersion) return showToast('Сначала выберите активную версию', 'error');
+    $id('blockcheckModal').classList.add('is-open');
+    if (blockcheckRunning) {
+      $id('blockcheckForm').hidden = true;
+      $id('blockcheckProgress').hidden = false;
+      $id('blockcheckStart').disabled = true;
+      return;
+    }
+    $id('blockcheckForm').hidden = false;
+    $id('blockcheckProgress').hidden = true;
+    $id('blockcheckStart').disabled = false;
+    $id('blockcheckDomains').focus();
+  }
+
+  function closeBlockcheckModal() {
+    $id('blockcheckModal').classList.remove('is-open');
+  }
+
+  function renderBlockcheckStrategies(strategies) {
+    const log = $id('versionsLog');
+    if (!log) return;
+    logTo(log, `Найдено стратегий: ${strategies.length}`, 'ok');
+
+    strategies.slice(0, 10).forEach((command, index) => {
+      const row = document.createElement('div');
+      row.className = 'log-line';
+      const preview = command.length > 160 ? command.slice(0, 160) + '…' : command;
+      row.innerHTML = `<span class="mono-value">${escapeHtml(preview)}</span> `;
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn-secondary btn-sm';
+      button.textContent = 'Сохранить .bat';
+      button.onclick = async () => {
+        try {
+          const path = await invoke('save_blockcheck_strategy', {
+            versionPath: state.activeVersion.path,
+            name: `blockcheck-${index + 1}`,
+            command
+          });
+          showToast('Стратегия сохранена: ' + path, 'success', { timeout: 8000 });
+        } catch (e) {
+          showToast('Не удалось сохранить стратегию: ' + e, 'error');
+        }
+      };
+      row.appendChild(button);
+      log.appendChild(row);
+      while (log.childElementCount > LOG_DRAWER_LIMIT) log.firstElementChild.remove();
+    });
+    syncLogDrawer();
+    setLogDrawerOpen(true);
+  }
+
+  async function runBlockcheck() {
+    if (!state.activeVersion) return showToast('Сначала выберите активную версию', 'error');
+    if (blockcheckRunning) return;
+    const raw = $id('blockcheckDomains').value || '';
+    const domains = raw.split(/[,;\s]+/).map(item => item.trim()).filter(Boolean);
+    if (!domains.length) return showToast('Укажите хотя бы один домен', 'error');
+
+    blockcheckRunning = true;
+    $id('blockcheckForm').hidden = true;
+    $id('blockcheckProgress').hidden = false;
+    $id('blockcheckStart').disabled = true;
+
+    logTo($id('versionsLog'), `Blockcheck: проверяем ${escapeHtml(domains.join(', '))}…`);
+    try {
+      const report = await invoke('run_blockcheck', {
+        versionPath: state.activeVersion.path,
+        domains
+      });
+      if (!report || typeof report !== 'object') throw new Error('Пустой ответ Blockcheck');
+
+      const lines = String(report.log || '').split(/\r?\n/).filter(Boolean);
+      lines.forEach(line => {
+        const cls = /blocked|fail|error|ошибка/i.test(line)
+          ? 'err'
+          : (/\[ok\]|summary|winws/i.test(line) ? 'ok' : '');
+        logTo($id('versionsLog'), escapeHtml(line), cls);
+      });
+      if (report.log_path) {
+        logTo($id('versionsLog'), `Лог сохранён: ${escapeHtml(report.log_path)}`, 'info');
+      }
+
+      if (Array.isArray(report.strategies) && report.strategies.length) {
+        renderBlockcheckStrategies(report.strategies);
+        showToast(`Найдено стратегий: ${report.strategies.length}`, 'success');
+      } else {
+        showToast('Blockcheck завершён. Рабочие стратегии не найдены.', 'info', { timeout: 7000 });
+      }
+      closeBlockcheckModal();
+    } catch (e) {
+      showToast('Blockcheck не выполнен: ' + e, 'error');
+      logTo($id('versionsLog'), 'Blockcheck: ' + escapeHtml(e), 'err');
+      $id('blockcheckForm').hidden = false;
+      $id('blockcheckProgress').hidden = true;
+    } finally {
+      blockcheckRunning = false;
+      $id('blockcheckStart').disabled = false;
+    }
+  }
+
+  $id('runZapretTestsBtn').onclick = async () => {
+    if (!state.activeVersion) {
+      return showToast('Сначала выберите активную версию во вкладке «Версии».', 'info');
+    }
+    const button = $id('runZapretTestsBtn');
+    if (button.disabled) return;
+    const spinner = $id('zapretTestsSpinner');
+    const label = $id('zapretTestsLabel');
+    const log = $id('versionsLog');
+    button.disabled = true;
+    spinner.hidden = false;
+    label.textContent = 'Тесты выполняются…';
+    logTo(log, 'Запуск тестов Zapret…', 'info');
+    try {
+      const output = await invoke('run_zapret_tests', { versionPath: state.activeVersion.path });
+      const lines = String(output || '').split(/\r?\n/).filter(Boolean);
+      if (!lines.length) logTo(log, 'Тесты завершены без вывода.', 'info');
+      lines.forEach(line => {
+        const cls = /blocked|fail|error|ошибка/i.test(line)
+          ? 'err'
+          : (/\[ok\]|summary|winws|success/i.test(line) ? 'ok' : '');
+        logTo(log, escapeHtml(line), cls);
+      });
+      showToast('Тесты Zapret завершены', 'success');
+    } catch (e) {
+      showToast('Тесты Zapret не выполнены: ' + e, 'error');
+      logTo(log, 'Тесты Zapret: ' + escapeHtml(e), 'err');
+    } finally {
+      button.disabled = false;
+      spinner.hidden = true;
+      label.textContent = 'Запустить тесты Zapret';
+    }
+  };
+
+  $id('blockcheckBtn').onclick = openBlockcheckModal;
+  $id('blockcheckCancel').onclick = closeBlockcheckModal;
+  $id('blockcheckClose').onclick = closeBlockcheckModal;
+  $id('blockcheckStart').onclick = runBlockcheck;
+  $id('blockcheckModal').addEventListener('click', (event) => {
+    if (event.target.id === 'blockcheckModal' && $id('blockcheckProgress').hidden) {
+      closeBlockcheckModal();
+    }
+  });
+
   document.querySelectorAll('.tab').forEach(tab => {
     tab.onclick = () => {
       document.querySelectorAll('.tab').forEach(t => {
@@ -2272,6 +3213,9 @@
       $id('tab-' + tab.dataset.tab).classList.add('active');
       if (tab.dataset.tab === 'lists') loadListsTab();
       if (tab.dataset.tab === 'trash') loadTrashTab();
+      if (tab.dataset.tab === 'network') loadNetworkTab();
+      if (tab.dataset.tab === 'hosts') loadHostsTab();
+      if (tab.dataset.tab === 'tools') loadToolsTab();
     };
   });
 

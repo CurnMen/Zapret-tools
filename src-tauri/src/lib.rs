@@ -1,9 +1,9 @@
 ﻿use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -44,6 +44,14 @@ pub struct Config {
     /// Слова, которые свитчер не должен исправлять автоматически.
     #[serde(default)]
     pub switcher_word_exclusions: Vec<String>,
+    /// Пользовательский словарь: слова, которые свитчер считает «своими».
+    #[serde(default)]
+    pub switcher_custom_dict_ru: Vec<String>,
+    #[serde(default)]
+    pub switcher_custom_dict_en: Vec<String>,
+    /// Слова, добавление которых пользователь отклонил: больше не предлагаем.
+    #[serde(default)]
+    pub switcher_declined_words: Vec<String>,
     /// Автопроверка обновлений самой программы при старте.
     /// У старых конфигов поля нет — тогда считаем, что проверка включена.
     #[serde(default = "default_true")]
@@ -64,6 +72,9 @@ impl Default for Config {
             switcher_enabled: false,
             switcher_exclusions: Vec::new(),
             switcher_word_exclusions: Vec::new(),
+            switcher_custom_dict_ru: Vec::new(),
+            switcher_custom_dict_en: Vec::new(),
+            switcher_declined_words: Vec::new(),
             auto_check_updates: true,
         }
     }
@@ -200,6 +211,9 @@ fn save_config(
         s.enabled = config.switcher_enabled;
         s.exclusions = config.switcher_exclusions.clone();
         s.word_exclusions = config.switcher_word_exclusions.clone();
+        s.custom_dict_ru = config.switcher_custom_dict_ru.clone();
+        s.custom_dict_en = config.switcher_custom_dict_en.clone();
+        s.declined_words = config.switcher_declined_words.clone();
     }
     Ok(())
 }
@@ -240,7 +254,9 @@ async fn find_running_winws() -> Option<String> {
                 }
             }
         }
-        let output = Command::new("reg").args(&["query", "HKLM\\System\\CurrentControlSet\\Services\\zapret", "/v", "ImagePath"]).output();
+        let mut reg = Command::new("reg");
+        hide_console(&mut reg);
+        let output = reg.args(&["query", "HKLM\\System\\CurrentControlSet\\Services\\zapret", "/v", "ImagePath"]).output();
         if let Ok(out) = output {
             if out.status.success() {
                 let stdout = String::from_utf8_lossy(&out.stdout);
@@ -269,7 +285,13 @@ fn open_folder(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn run_as_admin(bat_path: String) -> Result<(), String> {
-    Command::new("powershell").args(&["-Command", &format!("Start-Process '{}' -Verb RunAs", bat_path.replace("'", "''"))]).spawn().map_err(|e| e.to_string())?;
+    // UAC-запрос должен быть видимым, а консоль самого PowerShell — нет.
+    let mut command = Command::new("powershell");
+    hide_console(&mut command);
+    command
+        .args(["-Command", &format!("Start-Process '{}' -Verb RunAs", bat_path.replace("'", "''"))])
+        .spawn()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -286,7 +308,12 @@ fn manage_service(version_path: String, action: String) -> Result<(), String> {
         _ => return Err("Неизвестное действие".into()),
     };
     let ps_command = format!("Start-Process cmd -ArgumentList '/c {}' -Verb RunAs", cmd);
-    Command::new("powershell").args(&["-NoProfile", "-Command", &ps_command]).spawn().map_err(|e| e.to_string())?;
+    let mut command = Command::new("powershell");
+    hide_console(&mut command);
+    command
+        .args(["-NoProfile", "-Command", &ps_command])
+        .spawn()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -376,7 +403,10 @@ fn write_list_file(root_path: String, version_path: String, file_name: String, c
         let trash_dir = Path::new(&root_path).join("zapret_trash");
         if !trash_dir.exists() { let _ = fs::create_dir_all(&trash_dir); }
 
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        // Часы могут быть сбиты (дата до 1970 года) — имя файла не повод падать.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         let timestamp = now.as_secs();
         let trash_id = format!("trash_{}_{:09}.json", timestamp, now.subsec_nanos());
         let trash_data = TrashItem {
@@ -499,10 +529,26 @@ async fn sync_github(version_path: String, file_name: String, url: String) -> Re
     Ok(file_name)
 }
 
+/// Шаблон домена общий для `validate_list` и `smart_parse_domains`.
+///
+/// Раньше `Regex::new` вызывался на каждую проверку списка, то есть собирал
+/// автомат заново на каждый клик. Теперь шаблон компилируется один раз.
+static DOMAIN_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+fn domain_regex() -> &'static regex::Regex {
+    DOMAIN_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$",
+        )
+        // Шаблон — константа: сломаться может только при правке кода.
+        .expect("доменный regex должен компилироваться")
+    })
+}
+
 #[tauri::command]
 fn validate_list(content: String, is_ip_list: bool) -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
-    let domain_regex = regex::Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$").unwrap();
+    let domain_regex = domain_regex();
 
     for (index, line) in content.lines().enumerate() {
         let line = line.trim();
@@ -515,7 +561,7 @@ fn validate_list(content: String, is_ip_list: bool) -> Result<Vec<String>, Strin
             }
         } else {
             let (_, body, _) = split_zapret_line(line);
-            if body.is_empty() || !is_valid_domain_body(&body, &domain_regex) {
+            if body.is_empty() || !is_valid_domain_body(&body, domain_regex) {
                 errors.push(format!("Строка {}: '{}' — неверный домен", index + 1, line));
             }
         }
@@ -530,7 +576,7 @@ fn smart_parse_domains(input: String) -> Result<(Vec<String>, Vec<String>, usize
     let mut converted = 0;
 
     let tokens = input.split(|c: char| c.is_whitespace() || c == ',' || c == ';');
-    let domain_regex = regex::Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$").unwrap();
+    let domain_regex = domain_regex();
 
     for token in tokens {
         let t = token.trim();
@@ -550,7 +596,7 @@ fn smart_parse_domains(input: String) -> Result<(Vec<String>, Vec<String>, usize
             }
         }
 
-        if is_valid_domain_body(&body_out, &domain_regex) {
+        if is_valid_domain_body(&body_out, domain_regex) {
             valid.push(format!("{}{}{}", prefix, body_out, suffix));
         } else {
             invalid.push(t.to_string());
@@ -728,10 +774,23 @@ async fn check_zapret_version(version_path: String) -> Result<(String, String), 
     let bat_path = Path::new(&version_path).join("service.bat");
     let mut local_version = String::from("Unknown");
     if let Ok(content) = fs::read_to_string(bat_path) {
-        let re = regex::Regex::new(r#"LOCAL_VERSION=([\d\.]+)"#).unwrap();
+        static LOCAL_VERSION_RE: OnceLock<regex::Regex> = OnceLock::new();
+        let re = LOCAL_VERSION_RE.get_or_init(|| {
+            regex::Regex::new(r#"LOCAL_VERSION=([\d\.]+)"#)
+                // Шаблон — константа, компилируется всегда.
+                .expect("regex версии должен компилироваться")
+        });
         if let Some(caps) = re.captures(&content) { local_version = caps[1].to_string(); }
     }
-    let res = reqwest::get("https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt").await.map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let res = client
+        .get("https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt")
+        .send()
+        .await
+        .map_err(|e| format!("Сервер не отвечает: {e}"))?;
     if !res.status().is_success() { return Err("Не удалось проверить версию на GitHub".into()); }
     let remote_version = res.text().await.map_err(|e| e.to_string())?.trim().to_string();
     Ok((local_version, remote_version))
@@ -754,8 +813,19 @@ async fn download_zapret(root_path: String, active_name: String, new_version: St
     if extract_dir.exists() { let _ = fs::remove_dir_all(&extract_dir); }
     fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
     let ps_cmd = format!("Expand-Archive -Path '{}' -DestinationPath '{}' -Force", zip_path.to_string_lossy(), extract_dir.to_string_lossy());
-    let status = Command::new("powershell").args(&["-NoProfile", "-Command", &ps_cmd]).status();
-    if status.is_err() || !status.unwrap().success() { return Err("Не удалось распаковать архив".into()); }
+    let mut extract = Command::new("powershell");
+    hide_console(&mut extract);
+    let status = extract.args(&["-NoProfile", "-Command", &ps_cmd]).status();
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            return Err(format!(
+                "Не удалось распаковать архив (код {})",
+                status.code().unwrap_or(-1)
+            ))
+        }
+        Err(err) => return Err(format!("Не удалось запустить PowerShell: {err}")),
+    }
 
     let extracted_content = extract_dir.join("zapret-discord-youtube-main");
 
@@ -795,7 +865,12 @@ fn create_start_menu_shortcut() -> Result<(), String> {
         r#"$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut([Environment]::GetFolderPath('StartMenu') + '\Programs\Zapret Tools.lnk'); $Shortcut.TargetPath = '{}'; $Shortcut.Save()"#,
         exe_path.to_string_lossy()
     );
-    Command::new("powershell").args(&["-NoProfile", "-Command", &ps_script]).status().map_err(|e| e.to_string())?;
+    let mut command = Command::new("powershell");
+    hide_console(&mut command);
+    command
+        .args(["-NoProfile", "-Command", &ps_script])
+        .status()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1082,7 +1157,12 @@ fn install_strategy(version_path: String, strategy_name: String) -> Result<(), S
     if let Some(idx) = index {
         let bat_path = Path::new(&version_path).join("service.bat");
         let ps_cmd = format!("Start-Process cmd -ArgumentList '/c echo {} ^| \"\"{}\"\" admin' -Verb RunAs", idx, bat_path.to_string_lossy());
-        Command::new("powershell").args(&["-NoProfile", "-Command", &ps_cmd]).spawn().map_err(|e| e.to_string())?;
+        let mut command = Command::new("powershell");
+        hide_console(&mut command);
+        command
+            .args(["-NoProfile", "-Command", &ps_cmd])
+            .spawn()
+            .map_err(|e| e.to_string())?;
         Ok(())
     } else { Err("Стратегия не найдена".into()) }
 }
@@ -1096,6 +1176,11 @@ pub struct SwitcherState {
     pub exclusions: Vec<String>,
     /// Слова, которые не исправляются автоматически.
     pub word_exclusions: Vec<String>,
+    /// Пользовательские словари RU/EN: пополняются из UI и тоста.
+    pub custom_dict_ru: Vec<String>,
+    pub custom_dict_en: Vec<String>,
+    /// Слова, добавление которых пользователь отклонил.
+    pub declined_words: Vec<String>,
     pub admin: bool,
 }
 
@@ -1114,12 +1199,9 @@ pub struct Dictionaries {
     pub russian: HashSet<String>,
 }
 
-const ENGLISH_DICT_FILE: &str = "google-10000-english.txt";
-const RUSSIAN_DICT_FILE: &str = "100_000_russian_wordlist.txt";
-const ENGLISH_DICT_URL: &str =
-    "https://raw.githubusercontent.com/first20hours/google-10000-english/master/google-10000-english.txt";
-const RUSSIAN_DICT_URL: &str =
-    "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/ru/ru_50k.txt";
+/// Словари вшиты в бинарник на этапе компиляции: внешние файлы и сеть не нужны.
+const ENGLISH_DICT_TEXT: &str = include_str!("../../google-10000-english.txt");
+const RUSSIAN_DICT_TEXT: &str = include_str!("../../100_000_russian_wordlist.txt");
 
 // Словари загружаются один раз при старте. None — загрузить не удалось.
 static DICTIONARIES: OnceLock<Option<Dictionaries>> = OnceLock::new();
@@ -1179,6 +1261,117 @@ fn remove_switcher_word_exclusion(
     s.word_exclusions.clone()
 }
 
+/// Пользовательский словарь и список отклонённых предложений для UI.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct CustomWordsState {
+    pub ru: Vec<String>,
+    pub en: Vec<String>,
+    pub declined: Vec<String>,
+}
+
+const CUSTOM_WORD_LIMIT: usize = 500;
+
+/// Сравнение без учёта регистра и «ё»/«е» — как в словарях.
+fn list_contains_normalized(list: &[String], normalized: &str) -> bool {
+    list.iter()
+        .any(|item| normalize_for_lookup(item) == normalized)
+}
+
+fn snapshot_custom_words(s: &SwitcherState) -> CustomWordsState {
+    CustomWordsState {
+        ru: s.custom_dict_ru.clone(),
+        en: s.custom_dict_en.clone(),
+        declined: s.declined_words.clone(),
+    }
+}
+
+#[tauri::command]
+fn get_custom_words(state: tauri::State<Arc<Mutex<SwitcherState>>>) -> CustomWordsState {
+    snapshot_custom_words(&lock_switcher(&state))
+}
+
+/// Добавляет слово в пользовательский словарь `ru` или `en`.
+#[tauri::command]
+fn add_custom_word(
+    state: tauri::State<Arc<Mutex<SwitcherState>>>,
+    word: String,
+    language: String,
+) -> Result<CustomWordsState, String> {
+    let word = word.trim().to_string();
+    if word.is_empty() {
+        return Err("Слово не может быть пустым".into());
+    }
+    if word.chars().count() > 64 {
+        return Err("Слово длиннее 64 символов".into());
+    }
+    let normalized = normalize_for_lookup(&word);
+    let lang = language.trim().to_lowercase();
+    let mut s = lock_switcher(&state);
+    let list = match lang.as_str() {
+        "ru" => &mut s.custom_dict_ru,
+        "en" => &mut s.custom_dict_en,
+        _ => return Err(format!("Неизвестный язык словаря: {language}")),
+    };
+    if !list_contains_normalized(list, &normalized) {
+        list.push(word);
+        if list.len() > CUSTOM_WORD_LIMIT {
+            let extra = list.len() - CUSTOM_WORD_LIMIT;
+            list.drain(0..extra);
+        }
+    }
+    // Если слово когда-то отклоняли, ручное добавление отменяет отказ.
+    s.declined_words
+        .retain(|w| normalize_for_lookup(w) != normalized);
+    Ok(snapshot_custom_words(&s))
+}
+
+#[tauri::command]
+fn remove_custom_word(
+    state: tauri::State<Arc<Mutex<SwitcherState>>>,
+    word: String,
+    language: String,
+) -> Result<CustomWordsState, String> {
+    let normalized = normalize_for_lookup(&word);
+    let lang = language.trim().to_lowercase();
+    let mut s = lock_switcher(&state);
+    let list = match lang.as_str() {
+        "ru" => &mut s.custom_dict_ru,
+        "en" => &mut s.custom_dict_en,
+        _ => return Err(format!("Неизвестный язык словаря: {language}")),
+    };
+    list.retain(|w| normalize_for_lookup(w) != normalized);
+    Ok(snapshot_custom_words(&s))
+}
+
+/// Запоминает отказ: слово больше не предлагается для словаря.
+#[tauri::command]
+fn decline_custom_word(
+    state: tauri::State<Arc<Mutex<SwitcherState>>>,
+    word: String,
+) -> Vec<String> {
+    let word = word.trim().to_string();
+    if word.is_empty() {
+        return lock_switcher(&state).declined_words.clone();
+    }
+    let normalized = normalize_for_lookup(&word);
+    let mut s = lock_switcher(&state);
+    if !list_contains_normalized(&s.declined_words, &normalized) {
+        s.declined_words.push(word);
+        if s.declined_words.len() > CUSTOM_WORD_LIMIT {
+            let extra = s.declined_words.len() - CUSTOM_WORD_LIMIT;
+            s.declined_words.drain(0..extra);
+        }
+    }
+    s.declined_words.clone()
+}
+
+#[tauri::command]
+fn clear_declined_words(state: tauri::State<Arc<Mutex<SwitcherState>>>) -> Vec<String> {
+    let mut s = lock_switcher(&state);
+    s.declined_words.clear();
+    Vec::new()
+}
+
 #[tauri::command]
 fn get_switcher_config(state: tauri::State<Arc<Mutex<SwitcherState>>>) -> SwitcherConfig {
     let (enabled, exclusions, word_exclusions, admin) = {
@@ -1214,9 +1407,14 @@ fn start_switcher_listener(
 #[tauri::command]
 async fn get_running_processes() -> Vec<String> {
     // EnumWindows обходит все окна сессии — не блокируем поток UI.
-    tokio::task::spawn_blocking(running_window_processes)
-        .await
-        .unwrap_or_default()
+    match tokio::task::spawn_blocking(running_window_processes).await {
+        Ok(names) => names,
+        Err(err) => {
+            // Паника в задаче не должна молча превращаться в пустой список.
+            switcher_log(format!("не удалось перечислить процессы: {err}"));
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1275,7 +1473,10 @@ fn running_window_processes() -> Vec<String> {
                 return BOOL(1);
             }
 
-            let path = String::from_utf16_lossy(&buffer[..size as usize]);
+            // Длину, названную WinAPI, зажимаем в размер буфера: защита от
+            // рассинхронизации in/out-параметра стоит одного сравнения.
+            let capacity = (size as usize).min(buffer.len());
+            let path = String::from_utf16_lossy(&buffer[..capacity]);
             let Some(name) = Path::new(&path).file_name().and_then(|n| n.to_str()) else {
                 return BOOL(1);
             };
@@ -1585,7 +1786,7 @@ fn run_switcher_listener(shared: Arc<Mutex<SwitcherState>>, app: tauri::AppHandl
 
     if let Err(err) = result {
         use tauri::Emitter;
-        eprintln!("switcher: не удалось запустить rdev::listen: {err:?}");
+        switcher_log(format!("не удалось запустить rdev::listen: {err:?}"));
         let _ = app.emit(
             "switcher-error",
             "Не удалось запустить глобальный перехват клавиатуры. Свитчер не будет работать.".to_string(),
@@ -1603,17 +1804,24 @@ fn handle_finished_word(
     suppress_until: &Arc<AtomicU64>,
     app: &tauri::AppHandle,
 ) -> Option<String> {
-    let (enabled, exclusions, word_exclusions) = {
+    let (enabled, exclusions, word_exclusions, custom_ru, custom_en) = {
         let s = lock_switcher(shared);
-        (s.enabled, s.exclusions.clone(), s.word_exclusions.clone())
+        (
+            s.enabled,
+            s.exclusions.clone(),
+            s.word_exclusions.clone(),
+            s.custom_dict_ru.clone(),
+            s.custom_dict_en.clone(),
+        )
     };
     if !enabled {
         return None;
     }
 
     // Исключения: не вмешиваемся в работу выбранных программ.
-    if let Some(active) = get_active_process_name() {
-        if exclusions.iter().any(|ex| exclusion_matches(&active, ex)) {
+    let active_process = get_active_process_name();
+    if let Some(active) = active_process.as_deref() {
+        if exclusions.iter().any(|ex| exclusion_matches(active, ex)) {
             return None;
         }
     }
@@ -1628,7 +1836,7 @@ fn handle_finished_word(
     }
 
     let dicts = DICTIONARIES.get().and_then(|d| d.as_ref())?;
-    let fix = detect_layout_mistake(word, word_russian, dicts)?;
+    let fix = detect_layout_mistake(word, word_russian, dicts, &custom_ru, &custom_en)?;
 
     // Исключением может быть как набранное слово, так и результат замены:
     // пользователь видит в документе именно исправленное слово.
@@ -1640,11 +1848,38 @@ fn handle_finished_word(
         return None;
     }
 
+    // Замена должна менять раскладку. Если целевая раскладка уже включена,
+    // значит при наборе раскладка была определена неверно (типично для
+    // WebView2: раскладка host-потока расходится с потоком ввода) и
+    // перепечатывание вернуло бы на экран тот же самый текст — «мигание».
+    if fix.to_russian == active_layout_is_russian() {
+        switcher_log(format!(
+            "skip no-op: word='{}' word_russian={} corrected='{}' to_russian={} process='{}' | {}",
+            word,
+            word_russian,
+            fix.corrected,
+            fix.to_russian,
+            active_process.as_deref().unwrap_or("?"),
+            layout_diagnostics()
+        ));
+        return None;
+    }
+
+    switcher_log(format!(
+        "fix: word='{}' -> '{}' word_russian={} to_russian={} process='{}' | {}",
+        word,
+        fix.corrected,
+        word_russian,
+        fix.to_russian,
+        active_process.as_deref().unwrap_or("?"),
+        layout_diagnostics()
+    ));
+
     // Сразу подавляем собственные инжектированные клавиши, чтобы хук
     // не принял их за ввод пользователя и не испортил буфер.
     // 400 мс хватает на Backspace'ы и Ctrl+V; больше — и Double Shift,
     // нажатый сразу после исправления, начал бы «заедать».
-    suppress_until.store(now_ms() + 400, Ordering::SeqCst);
+    let my_suppress = suppress_for(suppress_until, 400);
     let suppress_worker = Arc::clone(suppress_until);
     let paste = format!("{} ", fix.corrected);
     let typed_len = fix.typed_len;
@@ -1663,9 +1898,61 @@ fn handle_finished_word(
         }
         // Короткий хвост, чтобы поглотить последние события SendInput.
         // Если вставка не удалась, инжекции не было — снимаем блокировку сразу.
-        suppress_worker.store(if applied { now_ms() + 150 } else { 0 }, Ordering::SeqCst);
+        end_suppression(&suppress_worker, my_suppress, if applied { 150 } else { 0 });
     });
     Some(corrected)
+}
+
+/// Предложение добавить пару слов в пользовательский словарь.
+/// Возвращает (исходное, переведённое, перевод_на_русский).
+fn custom_word_suggestion(
+    original: &str,
+    translated: &str,
+    source_russian: bool,
+    dicts: &Dictionaries,
+    state: &SwitcherState,
+) -> Option<(String, String, bool)> {
+    let original = original.trim();
+    let translated = translated.trim();
+    if original.chars().count() < 3 || translated.chars().count() < 4 {
+        return None;
+    }
+
+    let original_norm = normalize_for_lookup(original);
+    let translated_norm = normalize_for_lookup(translated);
+    let (source_base, target_base, source_custom, target_custom) = if source_russian {
+        (
+            &dicts.russian,
+            &dicts.english,
+            &state.custom_dict_ru,
+            &state.custom_dict_en,
+        )
+    } else {
+        (
+            &dicts.english,
+            &dicts.russian,
+            &state.custom_dict_en,
+            &state.custom_dict_ru,
+        )
+    };
+
+    // Обычное слово исходного языка пользователь мог перевести намеренно.
+    if source_base.contains(&original_norm) || list_contains_normalized(source_custom, &original_norm)
+    {
+        return None;
+    }
+    if target_base.contains(&translated_norm)
+        || list_contains_normalized(target_custom, &translated_norm)
+    {
+        return None;
+    }
+    if list_contains_normalized(&state.declined_words, &original_norm)
+        || list_contains_normalized(&state.declined_words, &translated_norm)
+    {
+        return None;
+    }
+
+    Some((original.to_string(), translated.to_string(), !source_russian))
 }
 
 /// Double Shift: конвертирует последнее набранное слово в другую раскладку.
@@ -1722,6 +2009,13 @@ fn trigger_double_shift(
         return;
     }
 
+    // Если переведённого слова нет в словарях, предложим запомнить пару.
+    // Отклонённые слова сюда уже не попадут (проверка внутри helper'а).
+    let suggestion = DICTIONARIES.get().and_then(|d| d.as_ref()).and_then(|dicts| {
+        let s = lock_switcher(shared);
+        custom_word_suggestion(&text, &converted, source_russian, dicts, &s)
+    });
+
     let paste_text = if has_space {
         format!("{converted} ")
     } else {
@@ -1735,15 +2029,25 @@ fn trigger_double_shift(
     *last_word_russian = to_russian;
     *last_word_followed_by_space = has_space;
 
-    suppress_until.store(now_ms() + 400, Ordering::SeqCst);
+    let my_suppress = suppress_for(suppress_until, 400);
     let suppress_worker = Arc::clone(suppress_until);
     let app_worker = app.clone();
     std::thread::spawn(move || {
         let applied = replace_word(typed_len, &paste_text, has_space, to_russian);
         if !applied {
             notify_clipboard_failure(&app_worker);
+        } else if let Some((original, translated, to_russian)) = suggestion {
+            use tauri::Emitter;
+            let _ = app_worker.emit(
+                "switcher-suggest-custom-word",
+                serde_json::json!({
+                    "original": original,
+                    "translated": translated,
+                    "to_russian": to_russian,
+                }),
+            );
         }
-        suppress_worker.store(if applied { now_ms() + 150 } else { 0 }, Ordering::SeqCst);
+        end_suppression(&suppress_worker, my_suppress, if applied { 150 } else { 0 });
     });
 }
 
@@ -1752,6 +2056,31 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Продлевает окно подавления и возвращает собственный дедлайн.
+///
+/// `suppress_until` читается из хука, а пишется из нескольких фоновых потоков.
+/// Прямой `store` мог укоротить окно, выставленное более длинной операцией
+/// (конвертация выделения держит 1,5 с): хук успевал принять нашу же
+/// инъекцию за ввод пользователя и портил буфер слова.
+fn suppress_for(until: &AtomicU64, ms: u64) -> u64 {
+    let deadline = now_ms().saturating_add(ms);
+    until.fetch_max(deadline, Ordering::SeqCst);
+    deadline
+}
+
+/// Завершает «своё» окно подавления: `tail_ms` от текущего момента, 0 — снять.
+///
+/// Запись выполняется, только если дедлайн всё ещё наш: иначе его уже продлила
+/// более новая операция, и обнуление открыло бы хук для её инъекций.
+fn end_suppression(until: &AtomicU64, mine: u64, tail_ms: u64) {
+    let target = if tail_ms == 0 {
+        0
+    } else {
+        now_ms().saturating_add(tail_ms)
+    };
+    let _ = until.compare_exchange(mine, target, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 /// Слово, которое только что было автоматически исправлено.
@@ -1865,6 +2194,8 @@ fn detect_layout_mistake(
     word: &str,
     current_is_russian: bool,
     dicts: &Dictionaries,
+    custom_ru: &[String],
+    custom_en: &[String],
 ) -> Option<Correction> {
     let word = word.trim();
     if word.chars().count() < 2 {
@@ -1880,14 +2211,14 @@ fn detect_layout_mistake(
     }
 
     let normalized = normalize_for_lookup(word);
-    let (current, opposite) = if current_is_russian {
-        (&dicts.russian, &dicts.english)
+    let (current, opposite, custom_current, custom_opposite) = if current_is_russian {
+        (&dicts.russian, &dicts.english, custom_ru, custom_en)
     } else {
-        (&dicts.english, &dicts.russian)
+        (&dicts.english, &dicts.russian, custom_en, custom_ru)
     };
 
-    // Слово есть в текущем языке — трогать не нужно.
-    if current.contains(&normalized) {
+    // Слово есть в текущем словаре (базовом или пользовательском) — не трогаем.
+    if current.contains(&normalized) || list_contains_normalized(custom_current, &normalized) {
         return None;
     }
 
@@ -1896,7 +2227,9 @@ fn detect_layout_mistake(
         return None;
     }
     let corrected_normalized = normalize_for_lookup(&corrected);
-    if corrected_normalized.chars().count() < 2 || !opposite.contains(&corrected_normalized) {
+    let known_in_opposite = opposite.contains(&corrected_normalized)
+        || list_contains_normalized(custom_opposite, &corrected_normalized);
+    if corrected_normalized.chars().count() < 2 || !known_in_opposite {
         return None;
     }
 
@@ -2052,29 +2385,87 @@ fn key_to_char(key: rdev::Key, shift: bool, caps_lock: bool, russian: bool) -> O
     }
 }
 
+/// Поток foreground-окна и поток, чья раскладка определяет вводимые символы.
+///
+/// В обычных Win32-приложениях это один и тот же поток. В WebView2/Electron/CEF
+/// (Ollama, Tauri, VS Code и т.п.) текст набирается в отдельном процессе
+/// браузерного движка: у окна приложения раскладка может быть «своя», а
+/// клавиатурный фокус принадлежит другому потоку. Раскладку нужно спрашивать
+/// у потока, который владеет окном с фокусом, — именно он превращает нажатия
+/// в символы.
 #[cfg(windows)]
-fn active_layout_is_russian() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+fn foreground_layout_threads() -> Option<(u32, u32)> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
+    };
 
+    // SAFETY: GetForegroundWindow/GetGUIThreadInfo только читают состояние
+    // рабочего стола; `info` инициализирован cbSize и живёт на стеке.
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_invalid() {
-            return false;
+            return None;
         }
-        let thread_id = GetWindowThreadProcessId(hwnd, None);
-        if thread_id == 0 {
-            return false;
+        let host_tid = GetWindowThreadProcessId(hwnd, None);
+        if host_tid == 0 {
+            return None;
         }
+
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        if GetGUIThreadInfo(host_tid, &mut info).is_ok() && !info.hwndFocus.is_invalid() {
+            let focus_tid = GetWindowThreadProcessId(info.hwndFocus, None);
+            if focus_tid != 0 {
+                return Some((host_tid, focus_tid));
+            }
+        }
+
+        Some((host_tid, host_tid))
+    }
+}
+
+#[cfg(windows)]
+fn layout_is_russian(thread_id: u32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
+
+    // SAFETY: GetKeyboardLayout — чистый геттер по идентификатору потока,
+    // указателей не принимает и владения ресурсом не требует.
+    unsafe {
         let hkl = GetKeyboardLayout(thread_id);
         // Младшее слово HKL — идентификатор языка; 0x0419 — ru-RU.
         ((hkl.0 as usize) & 0xFFFF) == 0x0419
     }
 }
 
+#[cfg(windows)]
+fn active_layout_is_russian() -> bool {
+    foreground_layout_threads().is_some_and(|(_, input_tid)| layout_is_russian(input_tid))
+}
+
 #[cfg(not(windows))]
 fn active_layout_is_russian() -> bool {
     false
+}
+
+/// Раскладки потоков для лога: видно, расходятся ли «раскладка окна»
+/// и «раскладка потока ввода» (типично для WebView2-приложений).
+#[cfg(windows)]
+fn layout_diagnostics() -> String {
+    match foreground_layout_threads() {
+        Some((host_tid, input_tid)) => format!(
+            "host_tid={host_tid} host_ru={} input_tid={input_tid} input_ru={}",
+            layout_is_russian(host_tid),
+            layout_is_russian(input_tid)
+        ),
+        None => "foreground=<none>".to_string(),
+    }
+}
+
+#[cfg(not(windows))]
+fn layout_diagnostics() -> String {
+    String::new()
 }
 
 /// Переключает раскладку активного окна без «слепого» тумблера.
@@ -2092,6 +2483,8 @@ fn ensure_keyboard_layout(to_russian: bool) {
     }
 
     let layout_id = if to_russian { w!("00000419") } else { w!("00000409") };
+    // SAFETY: `layout_id` — статическая строка нужной длины; HKL принадлежит
+    // системе (освобождать его нельзя), PostMessageW не блокирует поток.
     unsafe {
         if let Ok(hkl) = LoadKeyboardLayoutW(layout_id, KLF_ACTIVATE) {
             let hwnd = GetForegroundWindow();
@@ -2133,146 +2526,52 @@ fn switcher_log(message: impl AsRef<str>) {
     }
 }
 
-/// Прямая работа с буфером обмена через WinAPI.
-///
-/// `arboard` периодически не может открыть буфер: Windows отдаёт его занятым
-/// на несколько десятков миллисекунд. Здесь три попытки с паузой 50 мс,
-/// а все ошибки попадают в лог.
 #[cfg(windows)]
-mod win_clipboard {
-    use std::thread::sleep;
-    use std::time::Duration;
-    use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
-    use windows::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
-    };
-    use windows::Win32::System::Memory::{
-        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
-    };
-
-    /// CF_UNICODETEXT из WinUser.h (стабильное значение Win32 API).
-    const CF_UNICODETEXT: u32 = 13;
-    const OPEN_ATTEMPTS: u32 = 3;
-    const RETRY_DELAY: Duration = Duration::from_millis(50);
-    /// Предохранитель от незакрытой строки в чужом буфере.
-    const MAX_TEXT_CHARS: usize = 1 << 20;
-
-    /// Открывает буфер обмена (с повторами), выполняет операцию и закрывает его.
-    fn with_open<T>(operation: impl FnOnce() -> T) -> Option<T> {
-        for attempt in 1..=OPEN_ATTEMPTS {
-            // SAFETY: обычный вызов WinAPI; буфер закрывается в конце ветки.
-            match unsafe { OpenClipboard(None) } {
-                Ok(()) => {
-                    let result = operation();
-                    // SAFETY: буфер был успешно открыт выше.
-                    unsafe {
-                        let _ = CloseClipboard();
-                    }
-                    return Some(result);
-                }
-                Err(err) => {
-                    crate::switcher_log(format!(
-                        "clipboard: OpenClipboard, попытка {attempt}/{OPEN_ATTEMPTS}: {err}"
-                    ));
-                    if attempt < OPEN_ATTEMPTS {
-                        sleep(RETRY_DELAY);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Читает Unicode-текст. `None` — буфер недоступен или в нём не текст.
-    pub fn get_text() -> Option<String> {
-        with_open(|| {
-            // SAFETY: работаем только с валидным буфером, открытым в with_open.
-            unsafe {
-                let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
-                let global = HGLOBAL(handle.0);
-                let ptr = GlobalLock(global) as *const u16;
-                if ptr.is_null() {
-                    return None;
-                }
-
-                let mut len = 0usize;
-                while len < MAX_TEXT_CHARS && *ptr.add(len) != 0 {
-                    len += 1;
-                }
-                let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-                let _ = GlobalUnlock(global);
-                Some(text)
-            }
-        })
-        .flatten()
-    }
-
-    /// Кладёт Unicode-текст в буфер. `false` — не удалось после всех попыток.
-    pub fn set_text(text: &str) -> bool {
-        let mut wide: Vec<u16> = text.encode_utf16().collect();
-        wide.push(0);
-        let bytes = wide.len() * std::mem::size_of::<u16>();
-
-        with_open(|| {
-            // SAFETY: буфер открыт; память под строку выделяем через GlobalAlloc,
-            // после успешного SetClipboardData владельцем становится система.
-            unsafe {
-                if let Err(err) = EmptyClipboard() {
-                    crate::switcher_log(format!("clipboard: EmptyClipboard: {err}"));
-                    return false;
-                }
-
-                let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE, bytes) else {
-                    crate::switcher_log("clipboard: GlobalAlloc не удался");
-                    return false;
-                };
-
-                let ptr = GlobalLock(hmem) as *mut u16;
-                if ptr.is_null() {
-                    crate::switcher_log("clipboard: GlobalLock не удался");
-                    let _ = GlobalFree(hmem);
-                    return false;
-                }
-                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
-                let _ = GlobalUnlock(hmem);
-
-                if SetClipboardData(CF_UNICODETEXT, HANDLE(hmem.0)).is_err() {
-                    crate::switcher_log("clipboard: SetClipboardData не удался");
-                    let _ = GlobalFree(hmem);
-                    return false;
-                }
-                true
-            }
-        })
-        .unwrap_or(false)
-    }
-
-    /// Полностью очищает буфер (если прежнее содержимое восстановить нельзя).
-    pub fn clear() -> bool {
-        with_open(|| {
-            // SAFETY: буфер открыт в with_open.
-            unsafe { EmptyClipboard().is_ok() }
-        })
-        .unwrap_or(false)
-    }
-}
+mod clipboard;
+/// Прежнее имя модуля: вызывающий код свитчера не пришлось переименовывать.
+#[cfg(windows)]
+use self::clipboard as win_clipboard;
 
 /// Содержимое буфера обмена до подмены (нужно, чтобы вернуть его обратно).
 #[cfg(windows)]
+#[derive(Clone)]
 struct SavedClipboard {
-    text: Option<String>,
+    /// Прежнее содержимое буфера; `Unavailable` — прочитать не удалось.
+    previous: win_clipboard::ReadOutcome,
+    /// Поколение буфера на момент, когда мы забрали его под себя.
+    generation: u64,
+}
+
+/// Номер последней записи в буфер обмена.
+///
+/// При быстрой печати правки идут вплотную: поток предыдущей правки просыпается
+/// через 250 мс и возвращает старый текст, затирая содержимое следующей правки.
+/// Поколение позволяет восстановлению понять, что буфер уже принадлежит более
+/// новой операции, и не трогать его.
+#[cfg(windows)]
+static CLIPBOARD_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+impl SavedClipboard {
+    /// Забирает буфер под себя и запоминает поколение.
+    fn claim(previous: win_clipboard::ReadOutcome) -> Self {
+        Self {
+            previous,
+            generation: CLIPBOARD_GENERATION.fetch_add(1, Ordering::SeqCst) + 1,
+        }
+    }
 }
 
 /// Кладёт текст в буфер обмена и возвращает прежнее содержимое.
 /// `None` — буфер занят другим приложением или недоступен.
 #[cfg(windows)]
 fn clipboard_put(text: &str) -> Option<SavedClipboard> {
-    let previous = win_clipboard::get_text();
+    let previous = win_clipboard::read_text();
     if !win_clipboard::set_text(text) {
         switcher_log("clipboard: не удалось положить исправленный текст");
         return None;
     }
-    Some(SavedClipboard { text: previous })
+    Some(SavedClipboard::claim(previous))
 }
 
 /// Возвращает прежнее содержимое буфера с задержкой: приложению нужно
@@ -2281,18 +2580,33 @@ fn clipboard_put(text: &str) -> Option<SavedClipboard> {
 fn restore_clipboard(saved: SavedClipboard) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(250));
-        match saved.text {
-            Some(text) => {
+        // Пока шла задержка, буфер мог занять более новый поток правки:
+        // возврат старого текста испортил бы его вставку.
+        if CLIPBOARD_GENERATION.load(Ordering::SeqCst) != saved.generation {
+            return;
+        }
+        match saved.previous {
+            // Обычный путь: возвращаем то, что прочитали до подмены.
+            win_clipboard::ReadOutcome::Text(text) => {
                 if !win_clipboard::set_text(&text) {
                     switcher_log("clipboard: не удалось восстановить прежний текст");
                 }
             }
-            // Текст прочитать не удалось (в буфере было что-то другое) —
-            // лучше очистить, чем оставить там наше слово.
-            None => {
+            // Буфер был точно пуст (ни одного формата или пустой текст) —
+            // возвращаем его в пустое состояние, иначе наше слово останется
+            // в нём навсегда, и Ctrl+V вставит его вместо ожидаемой пустоты.
+            win_clipboard::ReadOutcome::Empty => {
                 if !win_clipboard::clear() {
                     switcher_log("clipboard: не удалось очистить буфер");
                 }
+            }
+            // Содержимое неизвестно или это не текст: буфер был занят, в нём
+            // лежала картинка/файлы либо GlobalSize вернул 0 (транзитное
+            // состояние Windows).
+            // Стирать неизвестное нельзя: восстановить его мы не сможем,
+            // а пользователь потеряет свои данные. Оставляем буфер как есть.
+            win_clipboard::ReadOutcome::Unavailable => {
+                switcher_log("clipboard: прежнее содержимое не прочитано, буфер не трогаем");
             }
         }
     });
@@ -2484,13 +2798,14 @@ fn convert_selection_blocking() -> bool {
 
     // 1. Запоминаем буфер и очищаем его: Ctrl+C должен дать именно выделение,
     //    а не то, что лежало в буфере раньше.
-    let original = win_clipboard::get_text();
+    let original = win_clipboard::read_text();
     if !win_clipboard::clear() {
         switcher_log("selection: не удалось очистить буфер обмена");
         return false;
     }
 
-    let restore = || restore_clipboard(SavedClipboard { text: original.clone() });
+    let saved = SavedClipboard::claim(original);
+    let restore = || restore_clipboard(saved.clone());
 
     let Ok(mut enigo) = Enigo::new(&Settings::default()) else {
         switcher_log("selection: не удалось создать Enigo");
@@ -2560,7 +2875,7 @@ fn convert_selection_blocking() -> bool {
 fn convert_selected_text(suppress_until: &Arc<AtomicU64>) {
     // Копирование и вставка занимают заметно больше времени, чем замена слова,
     // поэтому подавляем события хука с запасом. Внутри есть свои sleep'ы.
-    suppress_until.store(now_ms() + 1_500, Ordering::SeqCst);
+    let my_suppress = suppress_for(suppress_until, 1_500);
     let suppress_worker = Arc::clone(suppress_until);
     std::thread::spawn(move || {
         let converted = convert_selection_blocking();
@@ -2568,7 +2883,7 @@ fn convert_selected_text(suppress_until: &Arc<AtomicU64>) {
             switcher_log("selection: выделение не преобразовано");
         }
         // Не оставляем подавление «висеть»: пользователь может печатать сразу.
-        suppress_worker.store(if converted { now_ms() + 150 } else { 0 }, Ordering::SeqCst);
+        end_suppression(&suppress_worker, my_suppress, if converted { 150 } else { 0 });
     });
 }
 
@@ -2645,6 +2960,8 @@ fn parse_english_dictionary(content: &str) -> HashSet<String> {
 fn parse_russian_dictionary(content: &str) -> HashSet<String> {
     let mut words = HashSet::new();
     for line in content.lines() {
+        // Первая строка файла может начинаться с BOM.
+        let line = line.trim_start_matches('\u{feff}');
         // Формат файла — «слово частота», поэтому берём только первый токен.
         let Some(raw) = line.split_whitespace().next() else {
             continue;
@@ -2660,76 +2977,9 @@ fn parse_russian_dictionary(content: &str) -> HashSet<String> {
     words
 }
 
-fn candidate_dict_paths(app: &tauri::AppHandle, file_name: &str) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(|p| p.to_path_buf());
-        // Ищем рядом с exe и до 6 уровней выше: dev-сборка лежит в
-        // src-tauri/target/debug, а словари — в корне проекта.
-        for _ in 0..6 {
-            let Some(current) = dir.clone() else { break };
-            candidates.push(current.join(file_name));
-            candidates.push(current.join("dictionaries").join(file_name));
-            dir = current.parent().map(|p| p.to_path_buf());
-        }
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join(file_name));
-        candidates.push(cwd.join("dictionaries").join(file_name));
-        candidates.push(cwd.join("..").join(file_name));
-        candidates.push(cwd.join("..").join("dictionaries").join(file_name));
-    }
-
-    if let Ok(resources) = app.path().resource_dir() {
-        candidates.push(resources.join(file_name));
-        candidates.push(resources.join("dictionaries").join(file_name));
-    }
-
-    candidates
-}
-
-fn read_dictionary_text(app: &tauri::AppHandle, file_name: &str, url: &str) -> Result<String, String> {
-    // 1. Готовый файл рядом с приложением или в ресурсах.
-    for path in candidate_dict_paths(app, file_name) {
-        if path.is_file() {
-            return fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()));
-        }
-    }
-
-    // 2. Скачиваем в app_data_dir/dictionaries при первом запуске.
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("не удалось получить папку данных: {e}"))?
-        .join("dictionaries");
-    let target = data_dir.join(file_name);
-    if target.is_file() {
-        return fs::read_to_string(&target).map_err(|e| format!("{}: {e}", target.display()));
-    }
-
-    fs::create_dir_all(&data_dir).map_err(|e| format!("{}: {e}", data_dir.display()))?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(90))
-        .user_agent("ZapretTools/1.0")
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client.get(url).send().map_err(|e| format!("сеть: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
-    }
-    let text = response.text().map_err(|e| format!("чтение ответа: {e}"))?;
-    fs::write(&target, &text).map_err(|e| format!("{}: {e}", target.display()))?;
-    Ok(text)
-}
-
-fn load_dictionaries(app: &tauri::AppHandle) -> Result<Dictionaries, String> {
-    let english_text = read_dictionary_text(app, ENGLISH_DICT_FILE, ENGLISH_DICT_URL)?;
-    let russian_text = read_dictionary_text(app, RUSSIAN_DICT_FILE, RUSSIAN_DICT_URL)?;
-
-    let english = parse_english_dictionary(&english_text);
-    let russian = parse_russian_dictionary(&russian_text);
+fn load_dictionaries() -> Result<Dictionaries, String> {
+    let english = parse_english_dictionary(ENGLISH_DICT_TEXT);
+    let russian = parse_russian_dictionary(RUSSIAN_DICT_TEXT);
 
     if english.len() < 100 {
         return Err(format!("английский словарь пуст ({} слов)", english.len()));
@@ -2744,12 +2994,1449 @@ fn load_dictionaries(app: &tauri::AppHandle) -> Result<Dictionaries, String> {
 #[cfg(windows)]
 fn is_running_as_admin() -> bool {
     use windows::Win32::UI::Shell::IsUserAnAdmin;
+    // SAFETY: IsUserAnAdmin читает токен текущего процесса, побочных
+    // эффектов и указателей нет.
     unsafe { IsUserAnAdmin().as_bool() }
 }
 
 #[cfg(not(windows))]
 fn is_running_as_admin() -> bool {
     true
+}
+
+// --- СЕТЬ, HOSTS И ИНСТРУМЕНТЫ ---
+
+/// Скрывает консольное окно дочернего процесса (CREATE_NO_WINDOW),
+/// чтобы cmd/powershell не мигали поверх интерфейса.
+#[cfg(windows)]
+fn hide_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_console(_command: &mut Command) {}
+
+/// Экранирование строки для одинарных кавычек PowerShell.
+fn ps_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Запускает PowerShell без повышения прав и возвращает stdout (UTF-8).
+fn run_powershell(script: &str) -> Result<String, String> {
+    let wrapped = format!(
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding -ArgumentList $false\r\n{}",
+        script
+    );
+    let mut command = Command::new("powershell");
+    hide_console(&mut command);
+    let output = command
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &wrapped])
+        .output()
+        .map_err(|e| format!("не удалось запустить PowerShell: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("PowerShell завершился с кодом {}", output.status.code().unwrap_or(-1))
+        } else {
+            stderr
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Выполняет скрипт в отдельном процессе PowerShell с запросом UAC.
+/// Результат (успех/текст ошибки) скрипт пишет во временный файл, потому что
+/// `Start-Process -Verb RunAs` не умеет перенаправлять stdout.
+fn run_elevated_script(body: &str) -> Result<(), String> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join("zapret-tools");
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+
+    let base = format!("admin-{}-{seq}", std::process::id());
+    let script_path = dir.join(format!("{base}.ps1"));
+    let result_path = dir.join(format!("{base}.log"));
+
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\r\n\
+$ProgressPreference = 'SilentlyContinue'\r\n\
+$resultPath = {result}\r\n\
+try {{\r\n\
+{body}\r\n\
+  'OK' | Set-Content -LiteralPath $resultPath -Encoding UTF8\r\n\
+}} catch {{\r\n\
+  ('ERR: ' + $_.Exception.Message) | Set-Content -LiteralPath $resultPath -Encoding UTF8\r\n\
+  exit 1\r\n\
+}}\r\n",
+        result = ps_quote(&result_path.to_string_lossy()),
+        body = body
+    );
+    // UTF-8 с BOM: PowerShell 5.1 иначе читает .ps1 как ANSI и ломает
+    // кириллицу в сообщениях об ошибках.
+    let mut script_bytes = Vec::with_capacity(script.len() + 3);
+    script_bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    script_bytes.extend_from_slice(script.as_bytes());
+    fs::write(&script_path, script_bytes).map_err(|e| format!("{}: {e}", script_path.display()))?;
+
+    let outer = format!(
+        "try {{\r\n\
+$argList = '-NoProfile -ExecutionPolicy Bypass -File \"' + {script} + '\"'\r\n\
+$p = Start-Process powershell -Verb RunAs -PassThru -Wait -WindowStyle Hidden -ErrorAction Stop -ArgumentList $argList\r\n\
+exit $p.ExitCode\r\n\
+}} catch {{\r\n\
+[Console]::Error.WriteLine('ERR: ' + $_.Exception.Message)\r\n\
+exit 1\r\n\
+}}\r\n",
+        script = ps_quote(&script_path.to_string_lossy())
+    );
+    let mut command = Command::new("powershell");
+    hide_console(&mut command);
+    let output = command
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &outer])
+        .output()
+        .map_err(|e| format!("не удалось запустить PowerShell: {e}"))?;
+
+    let report = fs::read_to_string(&result_path).unwrap_or_default();
+    let report = report.trim_start_matches('\u{feff}').trim().to_string();
+    let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&result_path);
+
+    if output.status.success() && report.starts_with("OK") {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = stderr.strip_prefix("ERR:").map(str::trim).unwrap_or(&stderr).to_string();
+    let detail = if let Some(rest) = report.strip_prefix("ERR:") {
+        rest.trim().to_string()
+    } else if !stderr.is_empty() {
+        stderr
+    } else {
+        String::new()
+    };
+    let lowered = detail.to_lowercase();
+    if lowered.contains("cancel") || lowered.contains("отмен") {
+        return Err("Запрос прав администратора отклонён".into());
+    }
+    if detail.is_empty() {
+        return Err(format!(
+            "Операция не выполнена (код {})",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    Err(detail)
+}
+
+// ---------- DNS / DoH ----------
+
+fn doh_template_for(ip: &str) -> Option<&'static str> {
+    match ip.trim() {
+        "1.1.1.1" | "1.0.0.1" => Some("https://cloudflare-dns.com/dns-query"),
+        "8.8.8.8" | "8.8.4.4" => Some("https://dns.google/dns-query"),
+        "9.9.9.9" | "149.112.112.112" => Some("https://dns.quad9.net/dns-query"),
+        "94.140.14.14" | "94.140.15.15" => Some("https://dns.adguard-dns.com/dns-query"),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+fn list_network_interfaces() -> Vec<String> {
+    let script = "Get-NetIPConfiguration -ErrorAction SilentlyContinue | \
+Where-Object { $_.NetAdapter.Status -eq 'Up' } | \
+Sort-Object InterfaceIndex | ForEach-Object { $_.InterfaceAlias } | Select-Object -Unique";
+    match run_powershell(script) {
+        Ok(out) => out
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[tauri::command]
+fn get_dns_state(interface_name: String) -> Result<Vec<String>, String> {
+    let script = format!(
+        "(Get-DnsClientServerAddress -InterfaceAlias {} -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses",
+        ps_quote(&interface_name)
+    );
+    let out = run_powershell(&script)?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn validate_dns_address(value: &str, label: &str) -> Result<(), String> {
+    value
+        .parse::<std::net::IpAddr>()
+        .map(|_| ())
+        .map_err(|_| format!("{label}: некорректный IP-адрес «{value}»"))
+}
+
+#[tauri::command]
+fn set_dns(
+    interface_name: String,
+    dns1: String,
+    dns2: Option<String>,
+    doh: bool,
+) -> Result<(), String> {
+    let dns1 = dns1.trim().to_string();
+    if dns1.is_empty() {
+        return Err("Укажите основной DNS-сервер".into());
+    }
+    validate_dns_address(&dns1, "Основной DNS")?;
+    let dns2 = dns2
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(second) = &dns2 {
+        validate_dns_address(second, "Дополнительный DNS")?;
+    }
+
+    let mut script = format!(
+        "$name = {name}\r\n\
+netsh interface ip set dns name=\"$name\" source=static address={dns1} register=primary | Out-Null\r\n\
+if ($LASTEXITCODE -ne 0) {{ throw \"Не удалось изменить DNS (код $LASTEXITCODE)\" }}\r\n",
+        name = ps_quote(&interface_name),
+        dns1 = ps_quote(&dns1)
+    );
+
+    if let Some(second) = &dns2 {
+        script.push_str(&format!(
+            "netsh interface ip add dns name=\"$name\" address={second} index=2 | Out-Null\r\n",
+            second = ps_quote(second)
+        ));
+    }
+
+    // Шифрование DNS (Windows 11). На старых системах netsh просто вернёт
+    // ошибку — её игнорируем, обычный DNS при этом уже применён.
+    if doh {
+        if let Some(template) = doh_template_for(&dns1) {
+            script.push_str(&format!(
+                "try {{ netsh dns add encryption server={server} dohtemplate={template} autoupgrade=yes | Out-Null }} catch {{ }}\r\n",
+                server = ps_quote(&dns1),
+                template = ps_quote(template)
+            ));
+        }
+        if let Some(second) = &dns2 {
+            if let Some(template) = doh_template_for(second) {
+                script.push_str(&format!(
+                    "try {{ netsh dns add encryption server={server} dohtemplate={template} autoupgrade=yes | Out-Null }} catch {{ }}\r\n",
+                    server = ps_quote(second),
+                    template = ps_quote(template)
+                ));
+            }
+        }
+    }
+
+    script.push_str("ipconfig /flushdns | Out-Null\r\n");
+    run_elevated_script(&script)
+}
+
+#[tauri::command]
+fn reset_dns(interface_name: String) -> Result<(), String> {
+    let script = format!(
+        "$name = {name}\r\n\
+netsh interface ip set dns name=\"$name\" source=dhcp | Out-Null\r\n\
+if ($LASTEXITCODE -ne 0) {{ throw \"Не удалось сбросить DNS (код $LASTEXITCODE)\" }}\r\n\
+ipconfig /flushdns | Out-Null\r\n",
+        name = ps_quote(&interface_name)
+    );
+    run_elevated_script(&script)
+}
+
+// ---------- Блокировка QUIC ----------
+
+const QUIC_RULE_NAME: &str = "Zapret Tools Block QUIC";
+
+#[tauri::command]
+fn toggle_quic_block(enable: bool) -> Result<(), String> {
+    let rule = ps_quote(QUIC_RULE_NAME);
+    let script = if enable {
+        format!(
+            "netsh advfirewall firewall delete rule name={rule} | Out-Null\r\n\
+netsh advfirewall firewall add rule name={rule} dir=out action=block protocol=UDP localport=443,80 profile=any | Out-Null\r\n\
+if ($LASTEXITCODE -ne 0) {{ throw \"Не удалось создать правило брандмауэра (код $LASTEXITCODE)\" }}\r\n"
+        )
+    } else {
+        format!("netsh advfirewall firewall delete rule name={rule} | Out-Null\r\n")
+    };
+    run_elevated_script(&script)
+}
+
+#[tauri::command]
+fn get_quic_block_state() -> bool {
+    let script = format!(
+        "$rules = @(Get-NetFirewallRule -DisplayName {rule} -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' }}); if ($rules.Count -gt 0) {{ 'YES' }} else {{ 'NO' }}",
+        rule = ps_quote(QUIC_RULE_NAME)
+    );
+    matches!(run_powershell(&script), Ok(out) if out.contains("YES"))
+}
+
+// ---------- hosts ----------
+
+const HOSTS_BEGIN: &str = "# >>> Zapret Tools";
+const HOSTS_END: &str = "# <<< Zapret Tools";
+
+#[derive(Debug, Serialize)]
+pub struct HostsState {
+    pub path: String,
+    pub entries: Vec<String>,
+    pub content: String,
+}
+
+fn hosts_file_path() -> PathBuf {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    Path::new(&root)
+        .join("System32")
+        .join("drivers")
+        .join("etc")
+        .join("hosts")
+}
+
+/// Делит hosts на «всё остальное» и управляемый блок Zapret Tools.
+fn split_hosts_entries(content: &str) -> (String, Vec<String>) {
+    let mut base = Vec::new();
+    let mut entries = Vec::new();
+    let mut inside = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case(HOSTS_BEGIN) {
+            inside = true;
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case(HOSTS_END) {
+            inside = false;
+            continue;
+        }
+        if inside {
+            if !trimmed.is_empty() {
+                entries.push(trimmed.to_string());
+            }
+            continue;
+        }
+        // Подчищаем и старый формат: строки, помеченные комментарием.
+        if trimmed.to_lowercase().contains("# zapret tools") {
+            continue;
+        }
+        base.push(line.to_string());
+    }
+
+    (base.join("\n"), entries)
+}
+
+fn validate_hosts_entry(entry: &str) -> Result<(), String> {
+    if entry.contains('\r') || entry.contains('\n') {
+        return Err("Запись не должна содержать перевод строки".into());
+    }
+    let trimmed = entry.trim();
+    if trimmed.starts_with('#') {
+        return Ok(());
+    }
+    let mut parts = trimmed.split_whitespace();
+    let ip = parts.next().ok_or("Пустая запись")?;
+    let ip_ok = ip.contains('.') || ip.contains(':');
+    let ip_chars_ok = ip
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':' || c == '%');
+    if !ip_ok || !ip_chars_ok {
+        return Err(format!("Некорректный IP-адрес: {ip}"));
+    }
+    if parts.next().is_none() {
+        return Err(format!("После IP нужен хотя бы один домен: {trimmed}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn read_hosts() -> Result<HostsState, String> {
+    let path = hosts_file_path();
+    let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let content = String::from_utf8_lossy(&bytes).to_string();
+    let (_, entries) = split_hosts_entries(&content);
+    Ok(HostsState {
+        path: path.display().to_string(),
+        entries,
+        content,
+    })
+}
+
+#[tauri::command]
+async fn update_hosts(entries: Vec<String>) -> Result<(), String> {
+    const HOSTS_TIMEOUT: Duration = Duration::from_secs(30);
+
+    let normalized: Vec<String> = entries
+        .iter()
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    for entry in &normalized {
+        validate_hosts_entry(entry)?;
+    }
+
+    let path = hosts_file_path();
+    let current = fs::read(&path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default();
+    let (base, _) = split_hosts_entries(&current);
+
+    let mut lines: Vec<String> = base
+        .lines()
+        .map(|line| line.trim_end().to_string())
+        .collect();
+    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+
+    let mut text = lines.join("\r\n");
+    if !normalized.is_empty() {
+        text.push_str("\r\n\r\n");
+        text.push_str(HOSTS_BEGIN);
+        text.push_str("\r\n");
+        for entry in &normalized {
+            text.push_str(entry);
+            text.push_str("\r\n");
+        }
+        text.push_str(HOSTS_END);
+        text.push_str("\r\n");
+    } else if !text.is_empty() {
+        text.push_str("\r\n");
+    }
+
+    let temp = std::env::temp_dir().join(format!("zapret-tools-hosts-{}.txt", std::process::id()));
+    fs::write(&temp, &text).map_err(|e| format!("{}: {e}", temp.display()))?;
+
+    let script = format!(
+        "$content = [IO.File]::ReadAllText({temp}, [Text.Encoding]::UTF8)\r\n\
+$enc = New-Object System.Text.UTF8Encoding -ArgumentList $false\r\n\
+[IO.File]::WriteAllText({hosts}, $content, $enc)\r\n\
+ipconfig /flushdns | Out-Null\r\n",
+        temp = ps_quote(&temp.to_string_lossy()),
+        hosts = ps_quote(&path.to_string_lossy())
+    );
+
+    // UAC + запись выполняются в блокирующем потоке, но UI ждёт ответ
+    // асинхронно. Таймаут не даёт кнопке «Применить» зависнуть навсегда.
+    let temp_for_task = temp.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let result = run_elevated_script(&script);
+        let _ = fs::remove_file(&temp_for_task);
+        result
+    });
+
+    match tokio::time::timeout(HOSTS_TIMEOUT, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(
+            "PowerShell не ответил за 30 секунд. Проверьте запрос UAC и повторите.".to_string(),
+        ),
+    }
+}
+
+// ---------- Авто-обновление hosts из Zapret ----------
+
+const AUTO_HOSTS_BEGIN: &str = "# >>> Zapret Tools Auto-Hosts >>>";
+const AUTO_HOSTS_END: &str = "# <<< Zapret Tools Auto-Hosts <<<";
+const AUTO_HOSTS_URL: &str =
+    "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts";
+
+/// Приводит скачанный hosts к строкам без CR и без наших маркеров.
+fn sanitize_auto_hosts(downloaded: &str) -> Vec<String> {
+    let mut lines: Vec<String> = downloaded
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(|line| line.trim_end().to_string())
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.eq_ignore_ascii_case(AUTO_HOSTS_BEGIN)
+                && !trimmed.eq_ignore_ascii_case(AUTO_HOSTS_END)
+        })
+        .collect();
+
+    while lines.first().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        lines.remove(0);
+    }
+    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Вставляет автоматический блок hosts, заменяя старый между маркерами.
+/// Остальные строки файла остаются нетронутыми.
+fn apply_auto_hosts_block(current: &str, downloaded: &str) -> String {
+    let body = sanitize_auto_hosts(downloaded);
+
+    let mut block = Vec::with_capacity(body.len() + 2);
+    block.push(AUTO_HOSTS_BEGIN.to_string());
+    block.extend(body);
+    block.push(AUTO_HOSTS_END.to_string());
+
+    let normalized = current.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<String> = normalized.lines().map(|line| line.to_string()).collect();
+
+    let begin = lines
+        .iter()
+        .position(|line| line.trim().eq_ignore_ascii_case(AUTO_HOSTS_BEGIN));
+
+    let mut result: Vec<String> = Vec::with_capacity(lines.len() + block.len());
+    if let Some(start) = begin {
+        result.extend(lines[..start].iter().cloned());
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, line)| line.trim().eq_ignore_ascii_case(AUTO_HOSTS_END))
+            .map(|(index, _)| index);
+        let rest = end.map(|index| index + 1).unwrap_or(lines.len());
+        result.extend(block);
+        result.extend(lines[rest..].iter().cloned());
+    } else {
+        result.extend(lines);
+        while result.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+            result.pop();
+        }
+        if !result.is_empty() {
+            result.push(String::new());
+        }
+        result.extend(block);
+    }
+
+    while result.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        result.pop();
+    }
+    let mut text = result.join("\r\n");
+    text.push_str("\r\n");
+    text
+}
+
+#[tauri::command]
+async fn auto_update_hosts() -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent("zapret-tools")
+        .build()
+        .map_err(|e| format!("Не удалось создать HTTP-клиент: {e}"))?;
+
+    let response = client
+        .get(AUTO_HOSTS_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Не удалось скачать hosts: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Сервер вернул код {}", response.status()));
+    }
+
+    let downloaded = response
+        .text()
+        .await
+        .map_err(|e| format!("Не удалось прочитать ответ сервера: {e}"))?;
+    if downloaded.len() > 2 * 1024 * 1024 {
+        return Err("Скачанный файл hosts слишком большой".into());
+    }
+    let body = sanitize_auto_hosts(&downloaded);
+    if body.is_empty() {
+        return Err("Сервер вернул пустой файл hosts".into());
+    }
+    if downloaded.to_lowercase().contains("<html") {
+        return Err("Сервер вернул HTML вместо файла hosts".into());
+    }
+
+    let path = hosts_file_path();
+    let current = fs::read(&path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default();
+    let updated = apply_auto_hosts_block(&current, &downloaded);
+    let added = body.iter().filter(|line| !line.trim().is_empty()).count();
+
+    let temp = std::env::temp_dir().join(format!(
+        "zapret-tools-auto-hosts-{}.txt",
+        std::process::id()
+    ));
+    fs::write(&temp, &updated).map_err(|e| format!("{}: {e}", temp.display()))?;
+
+    let script = format!(
+        "$content = [IO.File]::ReadAllText({temp}, [Text.Encoding]::UTF8)\r\n\
+$enc = New-Object System.Text.UTF8Encoding -ArgumentList $false\r\n\
+[IO.File]::WriteAllText({hosts}, $content, $enc)\r\n\
+ipconfig /flushdns | Out-Null\r\n",
+        temp = ps_quote(&temp.to_string_lossy()),
+        hosts = ps_quote(&path.to_string_lossy())
+    );
+
+    let temp_for_task = temp.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let result = run_elevated_script(&script);
+        let _ = fs::remove_file(&temp_for_task);
+        result
+    });
+
+    match tokio::time::timeout(Duration::from_secs(30), task).await {
+        Ok(Ok(Ok(()))) => Ok(format!("Hosts обновлён: {added} записей")),
+        Ok(Ok(Err(err))) => Err(err),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(
+            "PowerShell не ответил за 30 секунд. Проверьте запрос UAC и повторите.".to_string(),
+        ),
+    }
+}
+
+// ---------- Встроенные тесты Zapret ----------
+
+/// Ввод для интерактивного меню `test zapret.ps1`: [1] Standard tests,
+/// [1] All configs. Дальше скрипт вопросов не задаёт.
+const ZAPRET_TESTS_INPUT: &str = "1\r\n1\r\n";
+
+fn zapret_tests_paths() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join("zapret-tools");
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let base = format!("zapret-tests-{}-{seq}", std::process::id());
+    let input = dir.join(format!("{base}.in"));
+    let stdout = dir.join(format!("{base}.out"));
+    let stderr = dir.join(format!("{base}.err"));
+    fs::write(&input, ZAPRET_TESTS_INPUT).map_err(|e| format!("{}: {e}", input.display()))?;
+    let _ = fs::remove_file(&stdout);
+    let _ = fs::remove_file(&stderr);
+    Ok((input, stdout, stderr, dir.join(format!("{base}.code"))))
+}
+
+fn read_text_lossy(path: &Path) -> String {
+    fs::read(path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default()
+}
+
+fn cleanup_files(paths: &[&Path]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Запускает `test zapret.ps1` без прав администратора (вывод собирается
+/// через перенаправление stdin/stdout/stderr).
+#[cfg(windows)]
+fn run_tests_plain(script: &Path) -> Result<String, String> {
+    let (input, stdout, stderr, code_path) = zapret_tests_paths()?;
+
+    let result = (|| {
+        let stdin = fs::File::open(&input).map_err(|e| format!("{}: {e}", input.display()))?;
+        let out = fs::File::create(&stdout).map_err(|e| format!("{}: {e}", stdout.display()))?;
+        let err = fs::File::create(&stderr).map_err(|e| format!("{}: {e}", stderr.display()))?;
+
+        let mut command = Command::new("powershell");
+        hide_console(&mut command);
+        let script_arg = script.to_string_lossy().to_string();
+        let status = command
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script_arg,
+            ])
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
+            .status()
+            .map_err(|e| format!("не удалось запустить PowerShell: {e}"))?;
+
+        let mut log = read_text_lossy(&stdout);
+        let err_text = read_text_lossy(&stderr);
+        if !err_text.trim().is_empty() {
+            log.push_str("\r\n");
+            log.push_str(&err_text);
+        }
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            if log.trim().is_empty() {
+                return Err(format!("Тесты завершились с кодом {code} без вывода"));
+            }
+            log = format!("[код выхода {code}]\r\n{log}");
+        }
+        Ok(log)
+    })();
+
+    cleanup_files(&[&input, &stdout, &stderr, &code_path]);
+    result
+}
+
+#[cfg(not(windows))]
+fn run_tests_plain(_script: &Path) -> Result<String, String> {
+    Err("Тесты Zapret доступны только в Windows".into())
+}
+
+/// Запускает тесты через UAC: повышенный PowerShell стартует обычный процесс
+/// с перенаправлением потоков в файлы. Консоль остаётся скрытой.
+#[cfg(windows)]
+fn run_tests_elevated(script: &Path) -> Result<String, String> {
+    let (input, stdout, stderr, code_path) = zapret_tests_paths()?;
+
+    let arg_list = ps_quote(&format!(
+        "-NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+        script.display()
+    ));
+    let body = format!(
+        "$argList = {arg_list}\r\n\
+$p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList \
+-RedirectStandardInput {input} -RedirectStandardOutput {stdout} \
+-RedirectStandardError {stderr} -WindowStyle Hidden -PassThru -Wait\r\n\
+if ($null -eq $p) {{ throw 'Не удалось запустить тесты Zapret' }}\r\n\
+Set-Content -LiteralPath {code} -Value $p.ExitCode -Encoding ASCII\r\n",
+        arg_list = arg_list,
+        input = ps_quote(&input.to_string_lossy()),
+        stdout = ps_quote(&stdout.to_string_lossy()),
+        stderr = ps_quote(&stderr.to_string_lossy()),
+        code = ps_quote(&code_path.to_string_lossy())
+    );
+
+    let result = (|| {
+        run_elevated_script(&body)?;
+
+        let mut log = read_text_lossy(&stdout);
+        let err_text = read_text_lossy(&stderr);
+        if !err_text.trim().is_empty() {
+            log.push_str("\r\n");
+            log.push_str(&err_text);
+        }
+        let code = read_text_lossy(&code_path).trim().to_string();
+        if !code.is_empty() && code != "0" {
+            if log.trim().is_empty() {
+                return Err(format!("Тесты завершились с кодом {code} без вывода"));
+            }
+            log = format!("[код выхода {code}]\r\n{log}");
+        }
+        Ok(log)
+    })();
+
+    cleanup_files(&[&input, &stdout, &stderr, &code_path]);
+    result
+}
+
+#[cfg(not(windows))]
+fn run_tests_elevated(_script: &Path) -> Result<String, String> {
+    Err("Тесты Zapret доступны только в Windows".into())
+}
+
+fn run_zapret_tests_blocking(script: &Path) -> Result<String, String> {
+    let log = if is_running_as_admin() {
+        run_tests_plain(script)?
+    } else {
+        run_tests_elevated(script)?
+    };
+
+    let log = log.trim();
+    if log.is_empty() {
+        return Ok("Тесты завершены, но не вывели результатов.".into());
+    }
+    // Не отдаём в UI мегабайты: последние 200 000 символов достаточно.
+    let total = log.chars().count();
+    if total > 200_000 {
+        let tail: String = log.chars().skip(total - 200_000).collect();
+        return Ok(format!("…[начало вывода обрезано]\r\n{tail}"));
+    }
+    Ok(log.to_string())
+}
+
+#[tauri::command]
+async fn run_zapret_tests(version_path: String) -> Result<String, String> {
+    let script = Path::new(&version_path)
+        .join("utils")
+        .join("test zapret.ps1");
+    if !script.is_file() {
+        return Err(format!(
+            "Не найден скрипт тестов: {}",
+            script.display()
+        ));
+    }
+
+    // Скрипт взаимодействует с ipset и запускает стратегии, поэтому даём
+    // до 30 минут. Сам UI ждёт асинхронно и остаётся отзывчивым.
+    let task = tokio::task::spawn_blocking(move || run_zapret_tests_blocking(&script));
+    match tokio::time::timeout(Duration::from_secs(30 * 60), task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(
+            "Тесты не завершились за 30 минут. Проверьте окно UAC и повторите.".to_string(),
+        ),
+    }
+}
+
+// ---------- Blockcheck ----------
+
+#[derive(Debug, Serialize)]
+pub struct BlockcheckReport {
+    pub log: String,
+    pub strategies: Vec<String>,
+    pub log_path: String,
+    pub source: String,
+}
+
+/// .bat-стратегии в корне сборки. `service.bat` — служебный, его не тестируем.
+fn list_strategy_bats(version_path: &str) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(version_path) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            if !path.is_file() {
+                return false;
+            }
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            name.ends_with(".bat") && !name.starts_with("service")
+        })
+        .collect();
+    files.sort();
+    // Больше 30 стратегий за один прогон — это уже часы ожидания.
+    files.truncate(30);
+    files
+}
+
+/// Значения `%GameFilterTCP%` / `%GameFilterUDP%` как их выставляет service.bat.
+fn strategy_game_filter_ports(version_path: &str) -> (String, String) {
+    let (enabled, mode, tcp, udp) = read_game_filter_config(version_path);
+    if !enabled {
+        return ("12".to_string(), "12".to_string());
+    }
+    match mode.to_ascii_lowercase().as_str() {
+        "all" => (tcp, udp),
+        "tcp" => (tcp, "12".to_string()),
+        "udp" => ("12".to_string(), udp),
+        _ => ("12".to_string(), "12".to_string()),
+    }
+}
+
+fn bat_root_prefix(root: &Path) -> String {
+    let text = root.to_string_lossy().replace('/', "\\");
+    format!("{}\\", text.trim_end_matches('\\'))
+}
+
+/// Склеивает строки .bat, разорванные символом `^`.
+fn logical_bat_lines(text: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    for raw in text.lines() {
+        let trimmed = raw.trim_end();
+        if let Some(head) = trimmed.strip_suffix('^') {
+            current.push_str(head);
+            current.push(' ');
+        } else {
+            current.push_str(trimmed);
+            result.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.trim().is_empty() {
+        result.push(current);
+    }
+    result
+}
+
+/// Переменные из `set "NAME=value"` плюс порты Game Filter.
+fn bat_variables(
+    lines: &[String],
+    root: &Path,
+    game_tcp: &str,
+    game_udp: &str,
+) -> HashMap<String, String> {
+    let prefix = bat_root_prefix(root);
+    let mut vars: HashMap<String, String> = HashMap::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if !trimmed
+            .get(..4)
+            .map(|head| head.eq_ignore_ascii_case("set "))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let rest = trimmed[4..].trim().trim_matches('"');
+        let Some((name, value)) = rest.split_once('=') else {
+            continue;
+        };
+        let value = value.trim_matches('"').replace("%~dp0", &prefix);
+        vars.insert(name.trim().to_ascii_lowercase(), value);
+    }
+
+    vars.entry("bin".to_string())
+        .or_insert_with(|| format!("{prefix}bin\\"));
+    vars.entry("lists".to_string())
+        .or_insert_with(|| format!("{prefix}lists\\"));
+    vars.insert("gamefiltertcp".to_string(), game_tcp.to_string());
+    vars.insert("gamefilterudp".to_string(), game_udp.to_string());
+    vars.insert("gamefilter".to_string(), game_tcp.to_string());
+    vars
+}
+
+fn expand_bat_variables(text: &str, vars: &HashMap<String, String>) -> String {
+    static VAR_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = VAR_RE.get_or_init(|| {
+        regex::Regex::new(r"%([A-Za-z_][A-Za-z0-9_]*)%").expect("variable regex")
+    });
+    re.replace_all(text, |caps: &regex::Captures| {
+        let key = caps[1].to_ascii_lowercase();
+        vars.get(&key)
+            .cloned()
+            .unwrap_or_else(|| caps[0].to_string())
+    })
+    .to_string()
+}
+
+/// Разбивает командную строку Windows на аргументы, сохраняя пробелы в кавычках.
+fn split_windows_command_line(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in input.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Ищет в строке вызов winws.exe и отделяет путь к exe от аргументов.
+fn extract_winws_invocation(line: &str) -> Option<(String, Vec<String>)> {
+    let lowered = line.to_ascii_lowercase();
+    let index = lowered.find("winws.exe")?;
+    let prefix = &line[..index];
+    let start = match prefix.rfind('"') {
+        Some(quote) if !prefix[quote + 1..].contains(char::is_whitespace) => quote,
+        _ => prefix
+            .rfind(char::is_whitespace)
+            .map(|space| space + 1)
+            .unwrap_or(0),
+    };
+    let tokens = split_windows_command_line(line[start..].trim());
+    let exe = tokens.first()?.clone();
+    if !exe.to_ascii_lowercase().ends_with("winws.exe") {
+        return None;
+    }
+    Some((exe, tokens[1..].to_vec()))
+}
+
+fn quote_cmd_argument(value: &str) -> String {
+    if value.is_empty() {
+        return "\"\"".to_string();
+    }
+    if value
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '&' | '|' | '<' | '>' | '^' | '%'))
+    {
+        format!("\"{value}\"")
+    } else {
+        value.to_string()
+    }
+}
+
+fn winws_command_line(exe: &str, args: &[String]) -> String {
+    let mut line = format!("\"{exe}\"");
+    for arg in args {
+        line.push(' ');
+        line.push_str(&quote_cmd_argument(arg));
+    }
+    line
+}
+
+async fn probe_strategy(client: &reqwest::Client, domains: &[String]) -> (bool, String) {
+    let mut failure = String::new();
+    for domain in domains {
+        let url = format!("https://{domain}/");
+        match client.get(&url).send().await {
+            Ok(response) => {
+                let code = response.status().as_u16();
+                // Любой HTTP-ответ означает, что соединение прошло. DPI-блок
+                // обычно рвёт TLS, а не отдаёт страницу.
+                if code < 500 {
+                    return (true, format!("{domain} — HTTP {code}"));
+                }
+                if failure.is_empty() {
+                    failure = format!("{domain} — HTTP {code}");
+                }
+            }
+            Err(err) => {
+                if failure.is_empty() {
+                    failure = format!("{domain} — {err}");
+                }
+            }
+        }
+    }
+    (false, failure)
+}
+
+/// Проверяет .bat-стратегии из корня сборки: запускает winws, ждёт 2,5 с,
+/// запрашивает домены с таймаутом 3 с и гасит процесс.
+async fn run_strategy_blockcheck(
+    version_path: &str,
+    domains: &[String],
+) -> Result<BlockcheckReport, String> {
+    let bats = list_strategy_bats(version_path);
+    if bats.is_empty() {
+        return Err(
+            "Для работы авто-подбора скачайте папку blockcheck с GitHub bol-van и положите её в папку с Zapret (или добавьте .bat-стратегии в корень сборки)."
+                .to_string(),
+        );
+    }
+
+    let root = Path::new(version_path);
+    let (game_tcp, game_udp) = strategy_game_filter_ports(version_path);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .connect_timeout(Duration::from_secs(3))
+        .user_agent("ZapretTools/1.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut log = String::from(
+        "[INFO] blockcheck.cmd не найден — проверяются .bat-стратегии из корня сборки.\r\n",
+    );
+    if !is_running_as_admin() {
+        log.push_str("[WARN] Нет прав администратора: winws может не примениться.\r\n");
+    }
+    if let Some(winws) = find_running_winws().await {
+        log.push_str(&format!(
+            "[WARN] Уже запущен {winws}. Остановите службу Zapret, иначе проверка будет неточной.\r\n"
+        ));
+    }
+    let (baseline_ok, baseline_detail) = probe_strategy(&client, domains).await;
+    if baseline_ok {
+        log.push_str(&format!(
+            "[WARN] Домены доступны без стратегии ({baseline_detail}) — возможны ложноположительные результаты.\r\n"
+        ));
+    }
+
+    let total = bats.len();
+    let mut working: Vec<String> = Vec::new();
+
+    for (index, bat) in bats.iter().enumerate() {
+        let name = bat
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        log.push_str(&format!("\r\n[TEST {}/{}] {name}\r\n", index + 1, total));
+
+        let text = match fs::read(bat) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes)
+                .trim_start_matches('\u{feff}')
+                .to_string(),
+            Err(err) => {
+                log.push_str(&format!("[SKIP] не удалось прочитать: {err}\r\n"));
+                continue;
+            }
+        };
+
+        let lines = logical_bat_lines(&text);
+        let vars = bat_variables(&lines, root, &game_tcp, &game_udp);
+        let mut invocation = None;
+        for line in &lines {
+            let expanded = expand_bat_variables(line, &vars);
+            if let Some(found) = extract_winws_invocation(&expanded) {
+                invocation = Some(found);
+                break;
+            }
+        }
+
+        let Some((exe, args)) = invocation else {
+            log.push_str("[SKIP] в файле нет команды winws.exe\r\n");
+            continue;
+        };
+        if exe.contains('%') {
+            log.push_str("[SKIP] не удалось подставить переменные в команду winws\r\n");
+            continue;
+        }
+        let exe_path = if Path::new(&exe).is_absolute() {
+            PathBuf::from(&exe)
+        } else {
+            root.join(&exe)
+        };
+        if !exe_path.is_file() {
+            log.push_str(&format!("[SKIP] не найден {}\r\n", exe_path.display()));
+            continue;
+        }
+
+        let mut command = Command::new(&exe_path);
+        hide_console(&mut command);
+        // Как в .bat: рабочий каталог bin, чтобы относительные пути к .bin
+        // и спискам совпадали с обычным запуском стратегии.
+        let work_dir = if root.join("bin").is_dir() {
+            root.join("bin")
+        } else {
+            root.to_path_buf()
+        };
+        command
+            .current_dir(work_dir)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                log.push_str(&format!("[SKIP] не удалось запустить winws: {err}\r\n"));
+                continue;
+            }
+        };
+
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        if let Ok(Some(status)) = child.try_wait() {
+            log.push_str(&format!(
+                "[FAIL] winws завершился с кодом {}\r\n",
+                status.code().unwrap_or(-1)
+            ));
+            continue;
+        }
+
+        let (ok, detail) = probe_strategy(&client, domains).await;
+        let _ = child.kill();
+        let _ = child.wait();
+
+        if ok {
+            log.push_str(&format!("[OK] {detail}\r\n"));
+            working.push(winws_command_line(&exe_path.to_string_lossy(), &args));
+        } else {
+            log.push_str(&format!("[FAIL] {detail}\r\n"));
+        }
+    }
+
+    log.push_str(&format!(
+        "\r\nSUMMARY: проверено стратегий: {total}, рабочих: {}\r\n",
+        working.len()
+    ));
+
+    let log_path = root.join("blockcheck.log");
+    fs::write(&log_path, &log).map_err(|e| format!("{}: {e}", log_path.display()))?;
+
+    Ok(BlockcheckReport {
+        log,
+        strategies: working,
+        log_path: log_path.display().to_string(),
+        source: "bat-strategies".to_string(),
+    })
+}
+
+fn sanitize_domain(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+        .collect()
+}
+
+fn find_blockcheck_cmd(version_path: &str) -> Option<PathBuf> {
+    let root = Path::new(version_path);
+    let dir = root.join("blockcheck");
+    for name in ["blockcheck.cmd", "blockcheck.bat"] {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if let Ok(entries) = fs::read_dir(&dir) {
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .map(|ext| ext.to_string_lossy().eq_ignore_ascii_case("cmd"))
+                        .unwrap_or(false)
+            })
+            .collect();
+        found.sort();
+        if let Some(path) = found.into_iter().next() {
+            return Some(path);
+        }
+    }
+    for name in ["blockcheck.cmd", "blockcheck.bat"] {
+        let candidate = root.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn extract_blockcheck_strategies(log: &str) -> Vec<String> {
+    let mut strategies: Vec<String> = Vec::new();
+    for line in log.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with("::") {
+            continue;
+        }
+        let lowered = line.to_lowercase();
+        if lowered.starts_with("rem ") || !lowered.contains("winws") {
+            continue;
+        }
+        let command = line.trim_start_matches('>').trim().to_string();
+        if command.is_empty() || strategies.iter().any(|item| item == &command) {
+            continue;
+        }
+        strategies.push(command);
+        if strategies.len() >= 50 {
+            break;
+        }
+    }
+    strategies
+}
+
+fn run_blockcheck_process(dir: &Path, cmd_name: &str, domains: &[String]) -> Result<String, String> {
+    // Одна строка для cmd: иначе кавычки вокруг имени файла ломаются при
+    // передаче через CreateProcess.
+    let mut line = format!("chcp 65001 >nul & \"{cmd_name}\"");
+    for domain in domains {
+        line.push(' ');
+        line.push_str(domain);
+    }
+
+    let mut command = Command::new("cmd");
+    hide_console(&mut command);
+    command
+        .current_dir(dir)
+        .arg("/c")
+        .arg(line)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    if !domains.is_empty() {
+        let joined = domains.join(",");
+        command.env("DOMAINS", &joined);
+        command.env("DOMAINS_DEFAULT", &joined);
+    }
+
+    let child = command
+        .spawn()
+        .map_err(|e| format!("не удалось запустить {cmd_name}: {e}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("ошибка ожидания {cmd_name}: {e}"))?;
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        if !text.is_empty() {
+            text.push_str("\r\n");
+        }
+        text.push_str(&stderr);
+    }
+    Ok(text)
+}
+
+#[tauri::command]
+async fn run_blockcheck(
+    version_path: String,
+    domains: Vec<String>,
+) -> Result<BlockcheckReport, String> {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+
+    if !Path::new(&version_path).is_dir() {
+        return Err("Папка версии не найдена".into());
+    }
+    if domains.is_empty() {
+        return Err("Укажите хотя бы один домен для проверки".into());
+    }
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("Blockcheck уже выполняется".into());
+    }
+    let _guard = Guard;
+
+    let domains: Vec<String> = domains
+        .iter()
+        .map(|domain| sanitize_domain(domain))
+        .filter(|domain| !domain.is_empty())
+        .collect();
+    if domains.is_empty() {
+        return Err("Укажите корректные домены для проверки".into());
+    }
+
+    let Some(cmd_path) = find_blockcheck_cmd(&version_path) else {
+        return run_strategy_blockcheck(&version_path, &domains).await;
+    };
+
+    let dir = cmd_path
+        .parent()
+        .map(|path| path.to_path_buf())
+        .ok_or("Не удалось определить папку blockcheck")?;
+    let cmd_name = cmd_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or("Некорректное имя blockcheck.cmd")?;
+    let log_path = dir.join("blockcheck.log");
+
+    let dir_for_task = dir.clone();
+    let domains_for_task = domains.clone();
+    let cmd_for_task = cmd_name.clone();
+
+    let log = tokio::task::spawn_blocking(move || {
+        run_blockcheck_process(&dir_for_task, &cmd_for_task, &domains_for_task)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    fs::write(&log_path, &log).map_err(|e| format!("{}: {e}", log_path.display()))?;
+
+    Ok(BlockcheckReport {
+        strategies: extract_blockcheck_strategies(&log),
+        log,
+        log_path: log_path.display().to_string(),
+        source: cmd_path.display().to_string(),
+    })
+}
+
+#[tauri::command]
+fn save_blockcheck_strategy(version_path: String, name: String, command: String) -> Result<String, String> {
+    if !command.to_lowercase().contains("winws") {
+        return Err("Команда не содержит winws.exe".into());
+    }
+    let mut stem: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if stem.is_empty() {
+        stem = "blockcheck-strategy".to_string();
+    }
+    let path = Path::new(&version_path).join(format!("{stem}.bat"));
+    let content = format!("@echo off\r\nchcp 65001 >nul\r\n{command}\r\npause\r\n");
+    fs::write(&path, content).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path.display().to_string())
+}
+
+// ---------- Инструменты (.exe в папке версии) ----------
+
+#[derive(Debug, Serialize)]
+pub struct RunningTool {
+    pub pid: u32,
+    pub name: String,
+}
+
+fn normalized_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_lowercase()
+}
+
+#[tauri::command]
+fn list_tools(version_path: String) -> Vec<String> {
+    let mut tools = Vec::new();
+    if let Ok(entries) = fs::read_dir(&version_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_exe = path
+                .extension()
+                .map(|ext| ext.to_string_lossy().eq_ignore_ascii_case("exe"))
+                .unwrap_or(false);
+            if !is_exe {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // winws.exe запускается стратегиями, отдельная кнопка ему не нужна.
+            if name.eq_ignore_ascii_case("winws.exe") {
+                continue;
+            }
+            tools.push(name);
+        }
+    }
+    tools.sort_by_key(|name| name.to_lowercase());
+    tools
+}
+
+#[tauri::command]
+fn start_tool(version_path: String, exe_name: String) -> Result<u32, String> {
+    if exe_name.contains('\\')
+        || exe_name.contains('/')
+        || exe_name.contains("..")
+        || exe_name.trim().is_empty()
+    {
+        return Err("Некорректное имя файла".into());
+    }
+    let exe = Path::new(&version_path).join(&exe_name);
+    if !exe.is_file() {
+        return Err(format!("Файл не найден: {}", exe.display()));
+    }
+    let child = Command::new(&exe)
+        .current_dir(&version_path)
+        .spawn()
+        .map_err(|e| format!("Не удалось запустить {exe_name}: {e}"))?;
+    Ok(child.id())
+}
+
+#[tauri::command]
+fn stop_tool(pid: u32) -> Result<(), String> {
+    let mut sys = System::new_all();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let pid = sysinfo::Pid::from_u32(pid);
+    match sys.process(pid) {
+        Some(process) => {
+            if process.kill() {
+                Ok(())
+            } else {
+                Err("Не удалось завершить процесс".into())
+            }
+        }
+        None => Err("Процесс уже завершён".into()),
+    }
+}
+
+#[tauri::command]
+async fn find_tool_processes(version_path: String) -> Vec<RunningTool> {
+    tokio::task::spawn_blocking(move || {
+        let base = normalized_path(Path::new(&version_path));
+        let mut sys = System::new_all();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        let mut result = Vec::new();
+        for (pid, process) in sys.processes() {
+            let Some(exe) = process.exe() else { continue };
+            let Some(parent) = exe.parent() else { continue };
+            if normalized_path(parent) != base {
+                continue;
+            }
+            let name = exe
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            result.push(RunningTool {
+                pid: pid.as_u32(),
+                name,
+            });
+        }
+        result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        result
+    })
+    .await
+    .unwrap_or_default()
 }
 
 fn exclusion_matches(active: &str, exclusion: &str) -> bool {
@@ -2771,6 +4458,8 @@ fn get_active_process_name() -> Option<String> {
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
+    // SAFETY: хэндл процесса открыт с PROCESS_QUERY_LIMITED_INFORMATION
+    // и закрывается ниже; буфер для имени — на стеке, его размер передаётся API.
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_invalid() { return None; }
@@ -2855,6 +4544,9 @@ pub fn run() {
                 enabled: saved.switcher_enabled,
                 exclusions: saved.switcher_exclusions,
                 word_exclusions: saved.switcher_word_exclusions,
+                custom_dict_ru: saved.switcher_custom_dict_ru,
+                custom_dict_en: saved.switcher_custom_dict_en,
+                declined_words: saved.switcher_declined_words,
                 admin,
             }));
             app.manage(Arc::clone(&switcher_state));
@@ -2863,7 +4555,7 @@ pub fn run() {
             let dict_app = app.handle().clone();
             std::thread::spawn(move || {
                 use tauri::Emitter;
-                match load_dictionaries(&dict_app) {
+                match load_dictionaries() {
                     Ok(dicts) => {
                         let _ = DICTIONARIES.set(Some(dicts));
                         let _ = dict_app.emit("switcher-dictionaries-ready", ());
@@ -2899,8 +4591,16 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &start, &stop, &quit])?;
 
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            // Отсутствие иконки не должно обрывать setup: раньше `unwrap()`
+            // здесь давал панику и пустое окно на старте.
+            let tray_builder = match app.default_window_icon() {
+                Some(icon) => TrayIconBuilder::new().icon(icon.clone()),
+                None => {
+                    switcher_log("tray: у приложения нет иконки по умолчанию");
+                    TrayIconBuilder::new()
+                }
+            };
+            let _tray = tray_builder
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
@@ -2911,18 +4611,35 @@ pub fn run() {
                                 let _ = window.set_focus();
                             }
                         }
-                        "start" => { let _ = Command::new("powershell").args(&["-NoProfile", "-Command", "Start-Process sc -ArgumentList 'start zapret' -Verb RunAs"]).spawn(); }
-                        "stop" => { let _ = Command::new("powershell").args(&["-NoProfile", "-Command", "Start-Process sc -ArgumentList 'stop zapret' -Verb RunAs"]).spawn(); }
+                        "start" => {
+                            let mut command = Command::new("powershell");
+                            hide_console(&mut command);
+                            let _ = command
+                                .args(["-NoProfile", "-Command", "Start-Process sc -ArgumentList 'start zapret' -Verb RunAs"])
+                                .spawn();
+                        }
+                        "stop" => {
+                            let mut command = Command::new("powershell");
+                            hide_console(&mut command);
+                            let _ = command
+                                .args(["-NoProfile", "-Command", "Start-Process sc -ArgumentList 'stop zapret' -Verb RunAs"])
+                                .spawn();
+                        }
                         "quit" => { app.exit(0); }
                         _ => {}
                     }
                 })
-                .build(app)?;
+                .build(app);
+            if let Err(err) = &_tray {
+                // Трей — необязательная часть: приложение продолжает работать.
+                switcher_log(format!("tray: не удалось создать иконку в трее: {err}"));
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                window.hide().unwrap();
+                // Окно уже могло быть уничтожено (выход из трея) — падать нельзя.
+                let _ = window.hide();
                 api.prevent_close();
             }
         })
@@ -2939,7 +4656,14 @@ pub fn run() {
             get_trash_files, restore_trash_file, empty_trash,
             update_switcher_config, get_switcher_config, start_switcher_listener,
             add_switcher_word_exclusion, remove_switcher_word_exclusion,
-            get_running_processes
+            get_custom_words, add_custom_word, remove_custom_word,
+            decline_custom_word, clear_declined_words,
+            get_running_processes,
+            run_blockcheck, save_blockcheck_strategy,
+            list_network_interfaces, get_dns_state, set_dns, reset_dns,
+            toggle_quic_block, get_quic_block_state,
+            read_hosts, update_hosts, auto_update_hosts, run_zapret_tests,
+            list_tools, start_tool, stop_tool, find_tool_processes
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -3252,7 +4976,7 @@ mod switcher_tests {
             russian: parse_russian_dictionary("привет 100\nюбка 50\n"),
         };
 
-        let fix = detect_layout_mistake(".,rf", false, &dicts).expect("must detect");
+        let fix = detect_layout_mistake(".,rf", false, &dicts, &[], &[]).expect("must detect");
         assert_eq!(fix.corrected, "юбка");
         assert!(fix.to_russian);
         assert_eq!(fix.typed_len, 4);
@@ -3284,21 +5008,118 @@ mod switcher_tests {
     }
 
     #[test]
+    fn embedded_dictionaries_load() {
+        // include_str!-словари должны реально парситься, а не быть пустыми.
+        let dicts = load_dictionaries().expect("embedded dictionaries");
+        assert!(dicts.english.len() > 5_000, "english: {}", dicts.english.len());
+        assert!(dicts.russian.len() > 50_000, "russian: {}", dicts.russian.len());
+    }
+
+    #[test]
     fn detects_wrong_layout_word() {
         let dicts = Dictionaries {
             english: parse_english_dictionary("hello\nworld\n"),
             russian: parse_russian_dictionary("привет 100\nмир 50\n"),
         };
 
-        let fix = detect_layout_mistake("ghbdtn", false, &dicts).expect("must detect");
+        let fix = detect_layout_mistake("ghbdtn", false, &dicts, &[], &[]).expect("must detect");
         assert_eq!(fix.corrected, "привет");
         assert!(fix.to_russian);
         assert_eq!(fix.typed_len, 6);
 
         // Слово есть в текущем словаре — не трогаем.
-        assert!(detect_layout_mistake("hello", false, &dicts).is_none());
+        assert!(detect_layout_mistake("hello", false, &dicts, &[], &[]).is_none());
         // Нет ни в одном словаре — тоже не трогаем.
-        assert!(detect_layout_mistake("zzzzzz", false, &dicts).is_none());
+        assert!(detect_layout_mistake("zzzzzz", false, &dicts, &[], &[]).is_none());
+    }
+
+    #[test]
+    fn custom_dictionary_is_used_for_detection_and_suggestion() {
+        let dicts = Dictionaries {
+            english: parse_english_dictionary("hello\n"),
+            russian: parse_russian_dictionary("привет 100\n"),
+        };
+
+        // Пара, которой нет в базовых словарях.
+        let typed = "rdflhjlbswbkzwbz";
+        let translated = convert_layout(typed, true);
+
+        // Если переведённое слово есть в пользовательском словаре RU,
+        // набор в EN-раскладке исправляется автоматически.
+        let custom_ru = vec![translated.clone()];
+        let fix = detect_layout_mistake(typed, false, &dicts, &custom_ru, &[])
+            .expect("custom word must be detected");
+        assert_eq!(fix.corrected, translated);
+        assert!(fix.to_russian);
+
+        // Слово из пользовательского словаря текущего языка не трогаем.
+        let custom_en = vec!["zzzzzz".to_string()];
+        assert!(detect_layout_mistake("zzzzzz", false, &dicts, &[], &custom_en).is_none());
+
+        let mut state = SwitcherState {
+            enabled: true,
+            exclusions: Vec::new(),
+            word_exclusions: Vec::new(),
+            custom_dict_ru: Vec::new(),
+            custom_dict_en: Vec::new(),
+            declined_words: Vec::new(),
+            admin: true,
+        };
+
+        let pair_typed = "qwertyuiopasdf";
+        let pair_translated = convert_layout(pair_typed, true);
+        let suggestion =
+            custom_word_suggestion(pair_typed, &pair_translated, false, &dicts, &state)
+                .expect("unknown pair should be suggested");
+        assert_eq!(suggestion.0, pair_typed);
+        assert_eq!(suggestion.1, pair_translated);
+        assert!(suggestion.2);
+
+        // После отказа предложение больше не отправляется.
+        state.declined_words.push(pair_typed.to_string());
+        assert!(custom_word_suggestion(pair_typed, &pair_translated, false, &dicts, &state).is_none());
+
+        // Настоящее слово исходного языка не предлагаем.
+        assert!(
+            custom_word_suggestion("hello", &convert_layout("hello", true), false, &dicts, &state)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn auto_hosts_block_appends_and_replaces() {
+        let first = apply_auto_hosts_block(
+            "127.0.0.1 localhost\r\n",
+            "1.2.3.4 example.com\n5.6.7.8 discord.com\n",
+        );
+        assert!(first.contains("127.0.0.1 localhost"));
+        assert!(first.contains(AUTO_HOSTS_BEGIN));
+        assert!(first.contains(AUTO_HOSTS_END));
+        assert!(first.contains("1.2.3.4 example.com"));
+        assert_eq!(first.matches(AUTO_HOSTS_BEGIN).count(), 1);
+
+        let second = apply_auto_hosts_block(&first, "9.9.9.9 youtube.com\n");
+        assert_eq!(second.matches(AUTO_HOSTS_BEGIN).count(), 1);
+        assert_eq!(second.matches(AUTO_HOSTS_END).count(), 1);
+        assert!(!second.contains("1.2.3.4 example.com"));
+        assert!(second.contains("9.9.9.9 youtube.com"));
+        assert!(second.contains("127.0.0.1 localhost"));
+        // Файл hosts в Windows должен остаться с CRLF.
+        assert!(!second.replace("\r\n", "").contains('\n'));
+    }
+
+    #[test]
+    fn auto_hosts_strips_its_own_markers_from_download() {
+        let downloaded = format!(
+            "{begin}\n1.1.1.1 one.example\n{end}\n2.2.2.2 two.example\n",
+            begin = AUTO_HOSTS_BEGIN,
+            end = AUTO_HOSTS_END
+        );
+        let result = apply_auto_hosts_block("", &downloaded);
+        assert_eq!(result.matches(AUTO_HOSTS_BEGIN).count(), 1);
+        assert_eq!(result.matches(AUTO_HOSTS_END).count(), 1);
+        assert!(result.contains("1.1.1.1 one.example"));
+        assert!(result.contains("2.2.2.2 two.example"));
     }
 
     #[test]
@@ -3310,6 +5131,9 @@ mod switcher_tests {
         assert!(!parsed.switcher_enabled);
         assert!(parsed.switcher_exclusions.is_empty());
         assert!(parsed.switcher_word_exclusions.is_empty());
+        assert!(parsed.switcher_custom_dict_ru.is_empty());
+        assert!(parsed.switcher_custom_dict_en.is_empty());
+        assert!(parsed.switcher_declined_words.is_empty());
     }
 
     #[test]
@@ -3321,5 +5145,59 @@ mod switcher_tests {
         // Смешанный текст и текст без букв не конвертируем.
         assert_eq!(detect_text_language("привет world"), None);
         assert_eq!(detect_text_language("123 !?"), None);
+    }
+}
+
+#[cfg(test)]
+mod blockcheck_parser_tests {
+    use super::*;
+
+    #[test]
+    fn joins_caret_continuation() {
+        let lines = logical_bat_lines(
+            "@echo off\r\nstart \"x\" winws.exe --a ^\r\n--b=1\r\n",
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("winws.exe --a  --b=1")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn extracts_winws_from_quoted_start_line() {
+        let (exe, args) = extract_winws_invocation(
+            r#"start "zapret: general" /min "C:\z\bin\winws.exe" --wf-tcp=80,443 --hostlist="C:\z\lists\list.txt""#,
+        )
+        .expect("winws command");
+        assert_eq!(exe, r"C:\z\bin\winws.exe");
+        assert_eq!(
+            args,
+            vec!["--wf-tcp=80,443", r"--hostlist=C:\z\lists\list.txt"]
+        );
+    }
+
+    #[test]
+    fn expands_bat_variables() {
+        let lines = logical_bat_lines(
+            "set \"BIN=%~dp0bin\\\"\r\nstart winws.exe --bin=\"%BIN%\" --port=%GameFilterTCP%\r\n",
+        );
+        let vars = bat_variables(&lines, Path::new(r"C:\zapret"), "1024-65535", "12");
+        let expanded = expand_bat_variables(
+            "start winws.exe --bin=\"%BIN%\" --port=%GameFilterTCP%",
+            &vars,
+        );
+        assert!(expanded.contains(r#"--bin="C:\zapret\bin\""#), "{expanded}");
+        assert!(expanded.contains("--port=1024-65535"), "{expanded}");
+    }
+
+    #[test]
+    fn splits_quoted_arguments() {
+        let args = split_windows_command_line(r#"--hostlist="C:\my lists\list.txt" --new"#);
+        assert_eq!(
+            args,
+            vec![r"--hostlist=C:\my lists\list.txt", "--new"]
+        );
     }
 }

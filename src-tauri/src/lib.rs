@@ -2557,6 +2557,49 @@ fn install_panic_hook(app: &tauri::AppHandle) {
     }));
 }
 
+/// Предел размера лога: свитчер живёт в трее месяцами и без ограничения
+/// файл растёт без предела.
+const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Локальное время для строки лога: `2026-11-21 18:05:34.889`.
+///
+/// epoch-миллисекунды нечитаемы и не позволяют быстро понять свежесть
+/// записи; отдельная зависимость ради форматирования не нужна — GetLocalTime
+/// есть в Windows.
+#[cfg(windows)]
+fn log_timestamp() -> String {
+    use windows::Win32::Foundation::SYSTEMTIME;
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+
+    // SAFETY: GetLocalTime заполняет собственную структуру и не падает.
+    let st: SYSTEMTIME = unsafe { GetLocalTime() };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
+    )
+}
+
+#[cfg(not(windows))]
+fn log_timestamp() -> String {
+    format!("{}", now_ms())
+}
+
+/// Переименовывает лог в `.log.1`, когда он перерос порог.
+///
+/// Вызывается под LOG_LOCK и до открытия файла: Windows не даёт переименовать
+/// открытый файл, а прежний `.1` просто заменяется.
+fn rotate_log(path: &Path) {
+    let too_big = fs::metadata(path)
+        .map(|meta| meta.len() >= LOG_MAX_BYTES)
+        .unwrap_or(false);
+    if !too_big {
+        return;
+    }
+    let backup = path.with_extension("log.1");
+    let _ = fs::remove_file(&backup);
+    let _ = fs::rename(path, &backup);
+}
+
 /// Диагностика свитчера. В GUI-сборке stderr никуда не выводится,
 /// поэтому параллельно пишем файл в TEMP.
 fn switcher_log(message: impl AsRef<str>) {
@@ -2577,7 +2620,8 @@ fn switcher_log(message: impl AsRef<str>) {
     let _guard = LOG_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     // Строку собираем целиком и пишем одним write_all — тогда даже короткая
     // запись одной ниткой не вклинится в середину чужой.
-    let line = format!("[{}] {message}\n", now_ms());
+    rotate_log(path);
+    let line = format!("[{}] {message}\n", log_timestamp());
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(line.as_bytes());
     }

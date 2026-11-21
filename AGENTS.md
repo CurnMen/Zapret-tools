@@ -17,7 +17,7 @@ Zapret (Flowseal). Tauri 2 + Rust, фронтенд — один HTML-файл �
 | Тесты | `cd src-tauri && cargo test --lib` | `32 passed; 0 failed` |
 | Dev-запуск | `npm run tauri dev` | окно + консоль (в debug-сборке `eprintln!` виден в терминале) |
 | Релиз + инсталлятор | `npm run tauri build` | `Finished release` + NSIS |
-| Лог свитчера | `%TEMP%\zapret-tools-switcher.log` | пишется всегда, в том числе в релизе |
+| Лог свитчера | `%TEMP%\zapret-tools-switcher.log` | пишется всегда, в том числе в релизе; при 2 МБ уезжает в `.log.1` |
 
 Артефакты: `src-tauri/target/release/zapret-tools.exe`,
 `src-tauri/target/release/bundle/nsis/Zapret Tools_1.0.0_x64-setup.exe`.
@@ -137,8 +137,9 @@ HTML + CSS + JS в одном файле, состояние в объекте `
   (сейчас не включён намеренно).
 - `bundle.targets: ["nsis"]`, иконки в `src-tauri/icons/`.
 - Плагины: dialog, opener, autostart, single-instance, updater.
-- Лог: `switcher_log` пишет в `%TEMP%\zapret-tools-switcher.log`; файл **не ротируется**,
-  время — epoch-миллисекунды.
+- Лог: `switcher_log` пишет в `%TEMP%\zapret-tools-switcher.log`; при 2 МБ файл
+  переименовывается в `zapret-tools-switcher.log.1` (прежний `.1` удаляется). Время —
+  локальное `2026-11-21 18:05:34.889`.
 
 ---
 
@@ -165,7 +166,6 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 |---|---|
 | Настройка «проверять обновления» мертва | `auto_check_updates` читается/сохраняется, но `tauri-plugin-updater` нигде не вызывает `check()`; эндпоинт `github.com/example/...` и pubkey-заглушка в конфиге |
 | Вкладка «Сеть» всё ещё медленная | PowerShell: интерфейсы ~4,4 с, DNS ~1,7 с, QUIC ~2,5 с. UI больше не фризит, но данные идут секундами. Кандидат на замену — `GetAdaptersAddresses` через `windows` crate |
-| Лог не ротируется | Копится с 14.11.2026, старые ошибки выглядят свежими; время в epoch-мс |
 | GUI не тестируется агентом | Окно Tauri недоступно инструментам браузера; проверка вкладок, свитчера и UAC — руками |
 
 ---

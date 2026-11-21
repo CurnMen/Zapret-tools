@@ -1534,7 +1534,22 @@ fn start_switcher_thread(shared: Arc<Mutex<SwitcherState>>, app: tauri::AppHandl
         return;
     }
     // rdev::listen блокирует поток, поэтому выносим хук в отдельный thread.
-    std::thread::spawn(move || run_switcher_listener(shared, app));
+    std::thread::spawn(move || {
+        // Флаг снимается при любом выходе из потока — и по ошибке listen,
+        // и по панике. Без этого после сбоя перехвата кнопка «Старт»
+        // молча ничего не делала до перезапуска приложения.
+        let _started = SwitcherStartedGuard;
+        run_switcher_listener(shared, app);
+    });
+}
+
+/// Снимает `SWITCHER_STARTED` при разрушении: выход из потока хука.
+struct SwitcherStartedGuard;
+
+impl Drop for SwitcherStartedGuard {
+    fn drop(&mut self) {
+        SWITCHER_STARTED.store(false, Ordering::SeqCst);
+    }
 }
 
 fn run_switcher_listener(shared: Arc<Mutex<SwitcherState>>, app: tauri::AppHandle) {
@@ -2511,6 +2526,36 @@ fn ensure_keyboard_layout(to_russian: bool) {
 
 #[cfg(not(windows))]
 fn ensure_keyboard_layout(_to_russian: bool) {}
+
+/// Паника в любом потоке попадает в лог свитчера и в окно.
+///
+/// По умолчанию паника в фоновом потоке только печатается в stderr, которого
+/// у GUI-сборки нет: свитчер молча перестаёт работать, и причину не найти.
+fn install_panic_hook(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+
+    let app = app.clone();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let place = info
+            .location()
+            .map(|loc| format!("{}:{}", loc.file(), loc.line()))
+            .unwrap_or_else(|| "неизвестное место".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "без текста".to_string());
+        // Хук не должен паниковать сам: только запись в лог и событие в окно.
+        switcher_log(format!("ПАНИКА {place}: {message}"));
+        let _ = app.emit(
+            "switcher-error",
+            format!("Внутренняя ошибка ({place}): {message}. Подробности — в диагностике."),
+        );
+        default_hook(info);
+    }));
+}
 
 /// Диагностика свитчера. В GUI-сборке stderr никуда не выводится,
 /// поэтому параллельно пишем файл в TEMP.
@@ -4571,6 +4616,9 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Паника в фоновом потоке (хук, правка слова, восстановление буфера)
+            // раньше терялась целиком: stderr у GUI-сборки никуда не виден.
+            install_panic_hook(app.handle());
             let args: Vec<String> = std::env::args().collect();
             if args.contains(&"--minimized".to_string()) {
                 if let Some(window) = app.get_webview_window("main") {

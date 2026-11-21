@@ -1604,12 +1604,14 @@ fn run_switcher_listener(shared: Arc<Mutex<SwitcherState>>, app: tauri::AppHandl
                             shift_break = false;
                             if !suppressed {
                                 let now = now_ms();
-                                let is_double = last_shift_press_ms != 0
-                                    && now.saturating_sub(last_shift_press_ms) <= 400
-                                    && !broke_sequence
-                                    && !ctrl_down
-                                    && !alt_down
-                                    && !meta_down;
+                                let is_double = is_double_shift(
+                                    last_shift_press_ms,
+                                    now,
+                                    broke_sequence,
+                                    ctrl_down,
+                                    alt_down,
+                                    meta_down,
+                                );
                                 if is_double {
                                     last_shift_press_ms = 0;
                                     trigger_double_shift(
@@ -1968,6 +1970,29 @@ fn custom_word_suggestion(
     }
 
     Some((original.to_string(), translated.to_string(), !source_russian))
+}
+
+/// Окно между нажатиями Shift для Double Shift.
+const DOUBLE_SHIFT_WINDOW_MS: u64 = 400;
+
+/// Считается ли текущее нажатие Shift вторым в Double Shift.
+///
+/// Условия отдельной функцией: их легко случайно сломать при правке хука,
+/// а проверяются они таблицей тестов.
+fn is_double_shift(
+    last_press_ms: u64,
+    now_ms: u64,
+    broke_sequence: bool,
+    ctrl_down: bool,
+    alt_down: bool,
+    meta_down: bool,
+) -> bool {
+    last_press_ms != 0
+        && now_ms.saturating_sub(last_press_ms) <= DOUBLE_SHIFT_WINDOW_MS
+        && !broke_sequence
+        && !ctrl_down
+        && !alt_down
+        && !meta_down
 }
 
 /// Double Shift: конвертирует последнее набранное слово в другую раскладку.
@@ -2716,6 +2741,40 @@ fn clipboard_put(text: &str) -> Option<SavedClipboard> {
     Some(SavedClipboard::claim(previous))
 }
 
+/// Что делать с буфером после вставки исправленного слова.
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+enum RestoreAction {
+    /// Вернуть прежний текст.
+    Put(String),
+    /// Буфер был доказанно пуст — очистить, чтобы наше слово не осталось в нём.
+    Clear,
+    /// Содержимое неизвестно или это не текст: не трогать, иначе потеряем данные.
+    Leave,
+}
+
+/// Таблица решений восстановления буфера, отдельно от WinAPI.
+#[cfg(windows)]
+fn restore_action(previous: &win_clipboard::ReadOutcome) -> RestoreAction {
+    match previous {
+        // Обычный путь: возвращаем то, что прочитали до подмены.
+        win_clipboard::ReadOutcome::Text(text) => RestoreAction::Put(text.clone()),
+        // Буфер был точно пуст (ни одного формата или пустой текст) — возвращаем
+        // его в пустое состояние, иначе наше слово останется в нём навсегда.
+        win_clipboard::ReadOutcome::Empty => RestoreAction::Clear,
+        // Содержимое неизвестно или это не текст: буфер был занят, в нём лежала
+        // картинка/файлы либо GlobalSize вернул 0 (транзитное состояние
+        // Windows). Стирать неизвестное нельзя: восстановить его мы не сможем.
+        win_clipboard::ReadOutcome::Unavailable => RestoreAction::Leave,
+    }
+}
+
+/// Восстановление допустимо, только если буфер с тех пор никто не занимал.
+#[cfg(windows)]
+fn restore_is_current(saved_generation: u64, current_generation: u64) -> bool {
+    saved_generation == current_generation
+}
+
 /// Возвращает прежнее содержимое буфера с задержкой: приложению нужно
 /// успеть прочитать вставленный текст.
 #[cfg(windows)]
@@ -2724,30 +2783,21 @@ fn restore_clipboard(saved: SavedClipboard) {
         std::thread::sleep(Duration::from_millis(250));
         // Пока шла задержка, буфер мог занять более новый поток правки:
         // возврат старого текста испортил бы его вставку.
-        if CLIPBOARD_GENERATION.load(Ordering::SeqCst) != saved.generation {
+        if !restore_is_current(saved.generation, CLIPBOARD_GENERATION.load(Ordering::SeqCst)) {
             return;
         }
-        match saved.previous {
-            // Обычный путь: возвращаем то, что прочитали до подмены.
-            win_clipboard::ReadOutcome::Text(text) => {
+        match restore_action(&saved.previous) {
+            RestoreAction::Put(text) => {
                 if !win_clipboard::set_text(&text) {
                     switcher_log("clipboard: не удалось восстановить прежний текст");
                 }
             }
-            // Буфер был точно пуст (ни одного формата или пустой текст) —
-            // возвращаем его в пустое состояние, иначе наше слово останется
-            // в нём навсегда, и Ctrl+V вставит его вместо ожидаемой пустоты.
-            win_clipboard::ReadOutcome::Empty => {
+            RestoreAction::Clear => {
                 if !win_clipboard::clear() {
                     switcher_log("clipboard: не удалось очистить буфер");
                 }
             }
-            // Содержимое неизвестно или это не текст: буфер был занят, в нём
-            // лежала картинка/файлы либо GlobalSize вернул 0 (транзитное
-            // состояние Windows).
-            // Стирать неизвестное нельзя: восстановить его мы не сможем,
-            // а пользователь потеряет свои данные. Оставляем буфер как есть.
-            win_clipboard::ReadOutcome::Unavailable => {
+            RestoreAction::Leave => {
                 switcher_log("clipboard: прежнее содержимое не прочитано, буфер не трогаем");
             }
         }
@@ -5576,5 +5626,75 @@ mod blockcheck_parser_tests {
             args,
             vec![r"--hostlist=C:\my lists\list.txt", "--new"]
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod clipboard_restore_tests {
+    use super::*;
+    use win_clipboard::ReadOutcome;
+
+    #[test]
+    fn previous_text_is_restored_verbatim() {
+        let previous = ReadOutcome::Text("привет, мир".to_string());
+        assert_eq!(
+            restore_action(&previous),
+            RestoreAction::Put("привет, мир".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_string_is_text_not_cleared_buffer() {
+        // Пустая строка — валидный текст: её возвращаем текстом, а не очисткой.
+        assert_eq!(
+            restore_action(&ReadOutcome::Text(String::new())),
+            RestoreAction::Put(String::new())
+        );
+    }
+
+    #[test]
+    fn proven_empty_buffer_is_cleared() {
+        // Только доказанная пустота (нет ни одного формата) даёт право чистить.
+        assert_eq!(restore_action(&ReadOutcome::Empty), RestoreAction::Clear);
+    }
+
+    #[test]
+    fn unknown_or_non_text_content_is_never_wiped() {
+        // Картинка/файлы/GlobalSize = 0: неизвестное не стираем.
+        assert_eq!(restore_action(&ReadOutcome::Unavailable), RestoreAction::Leave);
+    }
+
+    #[test]
+    fn stale_generation_stops_restore() {
+        assert!(restore_is_current(7, 7));
+        assert!(!restore_is_current(7, 8));
+        assert!(!restore_is_current(7, 0));
+    }
+}
+
+#[cfg(test)]
+mod double_shift_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_second_press_within_window() {
+        assert!(is_double_shift(1_000, 1_000, false, false, false, false));
+        assert!(is_double_shift(1_000, 1_400, false, false, false, false));
+    }
+
+    #[test]
+    fn rejects_slow_second_press_and_first_press() {
+        assert!(!is_double_shift(1_000, 1_401, false, false, false, false));
+        // Ноль — нажатий ещё не было: первое нажатие двойным не считается.
+        assert!(!is_double_shift(0, 1_000, false, false, false, false));
+    }
+
+    #[test]
+    fn rejects_when_sequence_was_broken_or_modifier_held() {
+        // Другая клавиша или колесо между нажатиями.
+        assert!(!is_double_shift(1_000, 1_100, true, false, false, false));
+        assert!(!is_double_shift(1_000, 1_100, false, true, false, false));
+        assert!(!is_double_shift(1_000, 1_100, false, false, true, false));
+        assert!(!is_double_shift(1_000, 1_100, false, false, false, true));
     }
 }

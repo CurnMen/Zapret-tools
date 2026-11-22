@@ -128,6 +128,21 @@ pub(crate) fn run_powershell(script: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Непредсказуемый суффикс для временных файлов UAC.
+fn random_suffix() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default(),
+    );
+    hasher.finish()
+}
+
 /// Выполняет скрипт в отдельном процессе PowerShell с запросом UAC.
 /// Результат (успех/текст ошибки) скрипт пишет во временный файл, потому что
 /// `Start-Process -Verb RunAs` не умеет перенаправлять stdout.
@@ -140,7 +155,11 @@ pub(crate) fn run_elevated_script(body: &str) -> Result<(), String> {
     let dir = std::env::temp_dir().join("zapret-tools");
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
-    let base = format!("admin-{}-{seq}", std::process::id());
+    let base = format!(
+        "admin-{}-{seq}-{:016x}",
+        std::process::id(),
+        random_suffix()
+    );
     let result_path = dir.join(format!("{base}.log"));
     let outer_path = dir.join(format!("{base}.outer.log"));
     let _ = fs::remove_file(&result_path);

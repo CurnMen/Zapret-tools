@@ -4,7 +4,7 @@
 журнал в конце** после значимых правок (правила ведения — раздел 8).
 
 Проект: **Zapret Tools** — Windows-приложение для управления сборкой обхода блокировок
-Zapret (Flowseal). Tauri 2 + Rust, фронтенд — один HTML-файл без фреймворков,
+Zapret (Flowseal). Tauri 2 + Rust, фронтенд — HTML/CSS и отдельный `app.js` без фреймворков,
 без сборщика и без npm-зависимостей во фронтенде.
 
 Репозиторий: https://github.com/CurnMen/Zapret-tools
@@ -16,11 +16,11 @@ Zapret (Flowseal). Tauri 2 + Rust, фронтенд — один HTML-файл �
 | Задача | Команда | Ожидаемо |
 |---|---|---|
 | Проверка типов | `cd src-tauri && cargo check` | exit 0, без предупреждений |
-| Тесты | `cd src-tauri && cargo test --lib` | `44 passed; 0 failed` |
+| Тесты | `cd src-tauri && cargo test --lib` | `49 passed; 0 failed` |
 | Dev-запуск | `npm run tauri dev` | окно + консоль (в debug-сборке `eprintln!` виден в терминале) |
 | Релиз + инсталлятор | `npm run tauri build` | `Finished release` + NSIS |
 | Лог свитчера | `%TEMP%\zapret-tools-switcher.log` | пишется всегда, в том числе в релизе; при 2 МБ уезжает в `.log.1` |
-| Проверка фронтенда | `node -e` + `new Function(code)` по `<script>` из `index.html` | JS синтаксически валиден (сборщика нет) |
+| Проверка фронтенда | `node --check src/app.js` | JS синтаксически валиден (сборщика нет) |
 
 Артефакты: `src-tauri/target/release/zapret-tools.exe`,
 `src-tauri/target/release/bundle/nsis/Zapret Tools_1.0.0_x64-setup.exe`.
@@ -36,7 +36,7 @@ Zapret (Flowseal). Tauri 2 + Rust, фронтенд — один HTML-файл �
 
 ## 2. Карта кода
 
-### `src-tauri/src/lib.rs` (~5060 строк) — свитчер, конфиг, списки, hosts, blockcheck
+### `src-tauri/src/lib.rs` (~5820 строк) — свитчер, конфиг, списки, hosts, blockcheck
 
 Разделы помечены маркерами `// ---------- Имя ----------` (номера строк на 21.11.2026,
 после правок они плывут — ищи по маркеру или по имени функции):
@@ -50,7 +50,7 @@ Zapret (Flowseal). Tauri 2 + Rust, фронтенд — один HTML-файл �
 | Встроенные тесты Zapret | `// ---------- Встроенные тесты Zapret ----------` |
 | Blockcheck | `// ---------- Blockcheck ----------` |
 | Инструменты (`.exe` в папке версии) | `// ---------- Инструменты ----------` |
-| Тесты | модули `game_filter_tests`, `service_flags_tests`, `switcher_tests`, `blockcheck_parser_tests`, `clipboard_restore_tests`, `double_shift_tests` |
+| Тесты | модули `game_filter_tests`, `service_flags_tests`, `switcher_tests`, `blockcheck_parser_tests`, `clipboard_restore_tests`, `double_shift_tests`, `security_helpers_tests`, `hosts_temp_file_tests` |
 
 Ключевые функции свитчера:
 
@@ -96,9 +96,10 @@ DNS/DoH и блокировка QUIC. Адаптеры и их DNS читают�
 
 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` — в релизе консоли нет.
 
-### `src/index.html` (~3460 строк) — весь фронтенд
+### `src/index.html` (~1150 строк) + `src/app.js` (~2530 строк) — фронтенд
 
-HTML + CSS + JS в одном файле, состояние в объекте `state`, обращения к бэкенду через
+HTML и CSS в `index.html`, скрипт — отдельный `app.js` (`<script src>`; CSP без
+`unsafe-inline` для скриптов), состояние в объекте `state`, обращения к бэкенду через
 `invoke(...)`. Вкладки переключаются обработчиком `document.querySelectorAll('.tab')`,
 каждая вкладка при активации грузит свои данные (`loadListsTab`, `loadNetworkTab`,
 `loadHostsTab`, `loadToolsTab`, `loadTrashTab`, `loadDiagnosticsTab`).
@@ -112,7 +113,9 @@ HTML + CSS + JS в одном файле, состояние в объекте `
    оборачивается в `hide_console(&mut command)` (`CREATE_NO_WINDOW`). Исключение —
    UAC-путь: `run_elevated_script` (там окно нужно для запроса прав). Тело скрипта
    передаётся через `-EncodedCommand` (UTF-16LE + Base64), без файла в `%TEMP%` —
-   иначе его можно подменить до нажатия «Да» в UAC (TOCTOU).
+   иначе его можно подменить до нажатия «Да» в UAC (TOCTOU). Файл hosts для UAC
+   создаётся со случайным именем и удерживается открытым с `FILE_SHARE_READ`, пока
+   привилегированный процесс его читает.
 3. **Не ломать `showConfirm()`** и передачу `rootPath`/`versionPath` с фронтенда —
    на них завязаны все файловые операции.
 4. **Боевых `unwrap()`/`expect()` в рабочем коде нет.** Ошибки — `Result<_, String>` для
@@ -125,8 +128,8 @@ HTML + CSS + JS в одном файле, состояние в объекте `
    `async` + `tokio::task::spawn_blocking`.** Синхронная команда выполняется в главном
    потоке и подвешивает окно (так было с вкладкой «Сеть»: 8,6 с фриза).
 7. **Кодировки и переводы строк.** `lib.rs` — UTF-8 **с BOM и CRLF**; `clipboard.rs`,
-   `logs.rs`, `win_cmd.rs`, `network.rs`, `AGENTS.md` — LF без BOM; `src/index.html` — как
-   есть. Правя `lib.rs` скриптом, читай байты, нормализуй CRLF→LF для замен и возвращай
+   `logs.rs`, `win_cmd.rs`, `network.rs`, `AGENTS.md` — LF без BOM; `src/index.html`,
+   `src/app.js` — CRLF без BOM. Правя `lib.rs` скриптом, читай байты, нормализуй CRLF→LF для замен и возвращай
    LF→CRLF при записи, BOM сохраняй.
 8. **`package.json` — без BOM.** Из него Tauri берёт версию (`"version": "../package.json"`);
    BOM ломает разбор и валит build-скрипт («expected value at line 1 column 1»).
@@ -187,8 +190,12 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 - `src-tauri/tauri.conf.json`: `frontendDist: "../src"`, `withGlobalTauri: true`,
   `version: "../package.json"` (единственный источник версии), у окна `devtools: true`.
   В релизе DevTools требуют feature `devtools` в `Cargo.toml` (сейчас не включён намеренно).
-  `security.csp` — не `null`: инлайновые скрипты/стили разрешены, внешние источники закрыты,
-  IPC разрешён через `connect-src 'self' ipc: http://ipc.localhost`.
+  `security.csp` — не `null`: скрипты только внешние (`script-src 'self'`, без
+  `unsafe-inline`), инлайн-стили и `style`-атрибуты разрешены (`style-src-attr`), внешние
+  источники закрыты,
+  IPC разрешён через `connect-src 'self' ipc: http://ipc.localhost`. Tauri добавляет nonce
+  в `style-src`, из-за чего `'unsafe-inline'` там игнорируется; поэтому `style`-атрибуты
+  разрешены отдельной директивой `style-src-attr 'unsafe-inline'`.
 - CI: `.github/workflows/ci.yml` на Windows — `cargo fmt --check`, `cargo clippy
   --all-targets -D warnings`, `cargo test --lib`, `cargo build --release` (запускается
   на push в `main`, пулл-реквестах и вручную).
@@ -228,7 +235,7 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 - `9bbc76e` — BOM убран из `package.json`.
 - `c735072` — модули `logs.rs`, `win_cmd.rs`, `network.rs`.
 
-Рабочая копия чистая: `files/` и `src-tauri/target-fix/` теперь в `.gitignore`.
+Рабочая копия чистая: `files/` и `src-tauri/target-fix/` в `.gitignore`.
 
 ---
 
@@ -239,8 +246,8 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 | Настройка «проверять обновления» мертва | `auto_check_updates` читается/сохраняется, но `tauri-plugin-updater` нигде не вызывает `check()`; эндпоинт `github.com/example/...` и pubkey-заглушка в конфиге |
 | ~~Вкладка «Сеть» медленная~~ | Решено в `64ffcd9`: IP Helper + COM, три запроса ~0,04 с (было 8,6 с). Резервные пути через PowerShell остались |
 | `lib.rs` всё ещё ~5060 строк | Первый этап разбиения сделан (`logs`, `win_cmd`, `network`). Дальше: `switcher.rs` (хук и правка), `hosts.rs`, `blockcheck.rs`, `versions.rs`. Двигать по одному модулю за коммит с прогоном тестов |
-| GUI не тестируется агентом | Окно Tauri недоступно инструментам браузера; проверка вкладок, свитчера и UAC — руками |
-| Updater не настроен, CSP настроен | `security.csp` закрывает внешние источники (остались инлайн-стили/скрипты). Плагин updater всё ещё без `check()`; эндпоинт `github.com/example/...` и pubkey-заглушка в конфиге |
+| GUI не тестируется агентом | Окно Tauri недоступно обычному браузеру. Запуск можно проверить через WebView2 CDP: `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`, затем `curl http://127.0.0.1:9222/json`. Клики, свитчер и UAC — руками |
+| Updater не настроен | `security.csp` закрывает внешние источники; скрипты только `app.js` (`script-src 'self'`), инлайн-стили и `style`-атрибуты разрешены. Плагин updater всё ещё без `check()`; эндпоинт `github.com/example/...` и pubkey-заглушка в конфиге |
 
 ---
 
@@ -282,3 +289,4 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 | 2026-11-22 | 1.0.0 | Очередь предложений словаря: список «Предложения словаря», счётчик на вкладке «Свитчер», «Добавить»/«Скрыть»/«Добавить все», дедупликация, лимит 30 | `index.html` | превью: 2 предложения, дубль, добавление из тоста, отказ, «Добавить все» (2 слова) |
 | 2026-11-22 | 1.0.0 | Словари RU/EN объединены в один список с меткой языка и ограничением высоты 220 px; список предложений и «отклонённые» собраны в одном блоке | `index.html` | превью: 2 слова, метки RU/EN, удаление, «Добавить все», `max-height: 220px` |
 | 2026-11-22 | 1.0.0 | Отклонённое предложение хранит пару слов и возвращается по «↺» (раньше `remove_declined_word` не существовала); отдельный компактный блок не пропадает вместе с очередью; строки списков — фиксированные 32 px | `lib.rs`, `index.html`, `AGENTS.md`, `CHANGELOG.md` | `cargo check`, `cargo test --lib` (44), JS-синтаксис |
+| 2026-11-22 | 1.0.0 | P0-безопасность: скрипт вынесен в `app.js`, CSP без `unsafe-inline`; логи и имена файлов выводятся текстом; пути IPC проверяются; файл hosts для UAC — случайное имя + lock; `error_for_status` и проверка тега при скачивании | `lib.rs`, `win_cmd.rs`, `index.html`, `app.js`, `tauri.conf.json`, `AGENTS.md`, `CHANGELOG.md` | `cargo check`, `cargo test --lib` (49), `clippy -D warnings`, `node --check`, релиз; CDP: `app.js` загружен, вкладки работают, 0 CSP-ошибок |

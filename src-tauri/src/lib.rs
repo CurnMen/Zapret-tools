@@ -1,7 +1,7 @@
 ﻿use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -287,6 +287,117 @@ fn save_config(
     Ok(())
 }
 
+// --- ГРАНИЦЫ ПУТЕЙ ---
+// Пути приходят из webview, поэтому проверяем их до файловых операций:
+// ошибка в интерфейсе не должна выводить запись или удаление за папку Zapret.
+
+/// Имя файла без каталогов и переходов вверх.
+fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= 255
+        && !name.contains(['\\', '/', ':', '\0'])
+}
+
+fn require_plain_file_name(name: &str) -> Result<(), String> {
+    if is_plain_file_name(name) {
+        Ok(())
+    } else {
+        Err(format!("Недопустимое имя файла: {name}"))
+    }
+}
+
+/// Путь существует и после канонизации лежит внутри `root` (не совпадая с ним).
+fn is_inside_root(root: &Path, path: &Path) -> bool {
+    match (root.canonicalize(), path.canonicalize()) {
+        (Ok(root), Ok(path)) => path != root && path.starts_with(&root),
+        _ => false,
+    }
+}
+
+fn require_inside_root(root: &Path, path: &Path) -> Result<(), String> {
+    if is_inside_root(root, path) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Путь вне выбранной папки Zapret: {}",
+            path.display()
+        ))
+    }
+}
+
+/// Папка версии — прямой потомок корня: `scan_versions` показывает только такие.
+fn is_version_child(root: &Path, path: &Path) -> bool {
+    match (root.canonicalize(), path.canonicalize()) {
+        (Ok(root), Ok(path)) => path.is_dir() && path.parent() == Some(root.as_path()),
+        _ => false,
+    }
+}
+
+/// Тег версии попадает в имя папки, поэтому разрешаем только безопасные символы.
+fn is_safe_version_tag(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// Уникальное имя во временной папке: предсказуемый файл проще подменить.
+fn unique_temp_path(prefix: &str, extension: &str) -> PathBuf {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    hasher.write_u128(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default(),
+    );
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{:016x}.{extension}",
+        std::process::id(),
+        hasher.finish()
+    ))
+}
+
+/// Создаёт файл, который нельзя перезаписать или удалить, пока открыт наш дескриптор.
+/// Данные читает привилегированный скрипт после UAC, поэтому между записью и чтением
+/// процесс без прав администратора не должен успеть подменить содержимое.
+fn create_locked_temp_file(path: &Path, content: &[u8]) -> std::io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)?;
+        file.write_all(content)?;
+        file.flush()?;
+        Ok(file)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(content)?;
+        file.flush()?;
+        Ok(file)
+    }
+}
+
+/// Ссылки на скачивание списков ограничены GitHub по HTTPS.
+fn is_allowed_github_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("https://raw.githubusercontent.com/")
+        || lower.starts_with("https://github.com/")
+}
+
 #[tauri::command]
 fn scan_versions(base_path: String) -> Result<Vec<VersionInfo>, String> {
     let path = Path::new(&base_path);
@@ -462,6 +573,7 @@ async fn read_list_files(version_path: String) -> Result<Vec<FileInfo>, String> 
 
 #[tauri::command]
 fn read_list_file(version_path: String, file_name: String) -> Result<String, String> {
+    require_plain_file_name(&file_name)?;
     let p1 = Path::new(&version_path).join("lists").join(&file_name);
     let p2 = Path::new(&version_path)
         .join("zapret-data")
@@ -478,6 +590,8 @@ fn write_list_file(
     file_name: String,
     content: String,
 ) -> Result<String, String> {
+    require_plain_file_name(&file_name)?;
+    require_inside_root(Path::new(&root_path), Path::new(&version_path))?;
     let p1 = Path::new(&version_path).join("lists").join(&file_name);
     let p2 = Path::new(&version_path)
         .join("zapret-data")
@@ -589,6 +703,14 @@ fn restore_trash_file(
     original_name: String,
     deleted_lines: Vec<String>,
 ) -> Result<String, String> {
+    require_inside_root(Path::new(&root_path), Path::new(&version_path))?;
+    if !is_plain_file_name(&trash_id)
+        || !trash_id.starts_with("trash_")
+        || !trash_id.ends_with(".json")
+    {
+        return Err("Недопустимый идентификатор корзины".into());
+    }
+    require_plain_file_name(&original_name)?;
     let trash_file = Path::new(&root_path).join("zapret_trash").join(&trash_id);
     let p1 = Path::new(&version_path).join("lists").join(&original_name);
     let p2 = Path::new(&version_path)
@@ -652,7 +774,16 @@ fn empty_trash(root_path: String) -> Result<(), String> {
 // --- ОСТАЛЬНЫЕ КОМАНДЫ ---
 #[tauri::command]
 fn read_external_file(path: String) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|e| e.to_string())
+    const MAX_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
+    let target = Path::new(&path);
+    let metadata = fs::metadata(target).map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
+        return Err("Импортировать можно только файл".into());
+    }
+    if metadata.len() > MAX_IMPORT_BYTES {
+        return Err("Файл больше 8 МБ — импорт списка такого размера не поддерживается".into());
+    }
+    fs::read_to_string(target).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -667,7 +798,11 @@ async fn sync_github(
     file_name: String,
     url: String,
 ) -> Result<String, String> {
-    let res = reqwest::get(url).await.map_err(|e| e.to_string())?;
+    if !is_allowed_github_url(&url) {
+        return Err("Разрешены только HTTPS-ссылки GitHub".into());
+    }
+    require_plain_file_name(&file_name)?;
+    let res = reqwest::get(&url).await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {
         return Err("Download failed".into());
     }
@@ -1023,15 +1158,24 @@ async fn download_zapret(
     active_name: String,
     new_version: String,
 ) -> Result<String, String> {
+    if !is_safe_version_tag(&new_version) {
+        return Err("Некорректная версия Zapret".into());
+    }
+    require_plain_file_name(&active_name)?;
     let root = Path::new(&root_path);
     let old_dir = root.join(&active_name);
+    require_inside_root(root, &old_dir)?;
     let new_dir_name = format!("zapret-discord-youtube-{}", new_version);
     let new_dir = root.join(&new_dir_name);
     let zip_path = root.join("update.zip");
     let extract_dir = root.join("temp_extracted");
 
     let url = "https://github.com/Flowseal/zapret-discord-youtube/archive/refs/heads/main.zip";
-    let res = reqwest::get(url).await.map_err(|e| e.to_string())?;
+    let res = reqwest::get(url)
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| format!("Не удалось скачать архив: {e}"))?;
     let bytes = res.bytes().await.map_err(|e| e.to_string())?;
     fs::write(&zip_path, bytes).map_err(|e| e.to_string())?;
 
@@ -1040,9 +1184,9 @@ async fn download_zapret(
     }
     fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
     let ps_cmd = format!(
-        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-        zip_path.to_string_lossy(),
-        extract_dir.to_string_lossy()
+        "Expand-Archive -Path {} -DestinationPath {} -Force",
+        ps_quote(&zip_path.to_string_lossy()),
+        ps_quote(&extract_dir.to_string_lossy())
     );
     let mut extract = Command::new("powershell");
     hide_console(&mut extract);
@@ -1087,11 +1231,12 @@ async fn download_zapret(
 }
 
 #[tauri::command]
-fn delete_version(version_path: String) -> Result<(), String> {
+fn delete_version(root_path: String, version_path: String) -> Result<(), String> {
     let path = Path::new(&version_path);
-    if path.exists() {
-        fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+    if !is_version_child(Path::new(&root_path), path) {
+        return Err("Удалять можно только папку версии внутри выбранной папки Zapret".into());
     }
+    fs::remove_dir_all(path).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2165,10 +2310,10 @@ fn handle_finished_word(
     // перепечатывание вернуло бы на экран тот же самый текст — «мигание».
     if fix.to_russian == active_layout_is_russian() {
         switcher_log(format!(
-            "skip no-op: word='{}' word_russian={} corrected='{}' to_russian={} process='{}' | {}",
-            word,
+            "skip no-op: word={} word_russian={} corrected={} to_russian={} process='{}' | {}",
+            word_for_log(word, cfg!(debug_assertions)),
             word_russian,
-            fix.corrected,
+            word_for_log(&fix.corrected, cfg!(debug_assertions)),
             fix.to_russian,
             active_process.as_deref().unwrap_or("?"),
             layout_diagnostics()
@@ -2177,9 +2322,9 @@ fn handle_finished_word(
     }
 
     switcher_log(format!(
-        "fix: word='{}' -> '{}' word_russian={} to_russian={} process='{}' | {}",
-        word,
-        fix.corrected,
+        "fix: word={} -> {} word_russian={} to_russian={} process='{}' | {}",
+        word_for_log(word, cfg!(debug_assertions)),
+        word_for_log(&fix.corrected, cfg!(debug_assertions)),
         word_russian,
         fix.to_russian,
         active_process.as_deref().unwrap_or("?"),
@@ -2212,6 +2357,15 @@ fn handle_finished_word(
         end_suppression(&suppress_worker, my_suppress, if applied { 150 } else { 0 });
     });
     Some(corrected)
+}
+
+/// Слово для журнала: в релизе содержимое не пишем, только длину.
+fn word_for_log(word: &str, include_text: bool) -> String {
+    if include_text {
+        format!("'{word}'")
+    } else {
+        format!("<{} симв.>", word.chars().count())
+    }
 }
 
 /// Предложение добавить пару слов в пользовательский словарь.
@@ -3622,8 +3776,10 @@ async fn update_hosts(entries: Vec<String>) -> Result<(), String> {
         text.push_str("\r\n");
     }
 
-    let temp = std::env::temp_dir().join(format!("zapret-tools-hosts-{}.txt", std::process::id()));
-    fs::write(&temp, &text).map_err(|e| format!("{}: {e}", temp.display()))?;
+    let temp = unique_temp_path("zapret-tools-hosts", "txt");
+    // Дескриптор живёт до конца чтения привилегированным процессом.
+    let guard = create_locked_temp_file(&temp, text.as_bytes())
+        .map_err(|e| format!("{}: {e}", temp.display()))?;
 
     let script = format!(
         "$content = [IO.File]::ReadAllText({temp}, [Text.Encoding]::UTF8)\r\n\
@@ -3639,6 +3795,7 @@ ipconfig /flushdns | Out-Null\r\n",
     let temp_for_task = temp.clone();
     let task = tokio::task::spawn_blocking(move || {
         let result = run_elevated_script(&script);
+        drop(guard);
         let _ = fs::remove_file(&temp_for_task);
         result
     });
@@ -3785,11 +3942,10 @@ async fn auto_update_hosts() -> Result<String, String> {
     let updated = apply_auto_hosts_block(&current, &downloaded);
     let added = body.iter().filter(|line| !line.trim().is_empty()).count();
 
-    let temp = std::env::temp_dir().join(format!(
-        "zapret-tools-auto-hosts-{}.txt",
-        std::process::id()
-    ));
-    fs::write(&temp, &updated).map_err(|e| format!("{}: {e}", temp.display()))?;
+    let temp = unique_temp_path("zapret-tools-auto-hosts", "txt");
+    // Дескриптор живёт до конца чтения привилегированным процессом.
+    let guard = create_locked_temp_file(&temp, updated.as_bytes())
+        .map_err(|e| format!("{}: {e}", temp.display()))?;
 
     let script = format!(
         "$content = [IO.File]::ReadAllText({temp}, [Text.Encoding]::UTF8)\r\n\
@@ -3803,6 +3959,7 @@ ipconfig /flushdns | Out-Null\r\n",
     let temp_for_task = temp.clone();
     let task = tokio::task::spawn_blocking(move || {
         let result = run_elevated_script(&script);
+        drop(guard);
         let _ = fs::remove_file(&temp_for_task);
         result
     });
@@ -5592,5 +5749,73 @@ mod declined_word_tests {
             parsed.switcher_declined_words,
             config.switcher_declined_words
         );
+    }
+}
+
+#[cfg(test)]
+mod security_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn word_log_redacts_text_when_disabled() {
+        assert_eq!(word_for_log("секрет", false), "<6 симв.>");
+        assert_eq!(word_for_log("секрет", true), "'секрет'");
+    }
+
+    #[test]
+    fn plain_file_names_reject_traversal() {
+        for name in ["", ".", "..", "a/b", "a\\b", "C:evil", "a\0b"] {
+            assert!(!is_plain_file_name(name), "должно быть отклонено: {name:?}");
+        }
+        for name in ["domains.txt", "list-user.txt", "hosts", "a.b.c"] {
+            assert!(is_plain_file_name(name), "должно быть принято: {name:?}");
+        }
+    }
+
+    #[test]
+    fn version_tag_is_restricted() {
+        for tag in ["1.9.2", "v1.9.2", "1_9-2"] {
+            assert!(is_safe_version_tag(tag), "должно быть принято: {tag}");
+        }
+        for tag in ["", "../1.9", "1.9/2", "1.9 2", "1.9\\2", "1.9:2"] {
+            assert!(!is_safe_version_tag(tag), "должно быть отклонено: {tag:?}");
+        }
+    }
+
+    #[test]
+    fn version_folder_must_be_direct_child() {
+        let root = std::env::temp_dir().join(format!("zapret-root-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("zapret-outside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(root.join("zapret-1.9")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        assert!(is_version_child(&root, &root.join("zapret-1.9")));
+        assert!(!is_version_child(&root, &root));
+        assert!(!is_version_child(&root, &outside));
+        assert!(is_inside_root(&root, &root.join("zapret-1.9")));
+        assert!(!is_inside_root(&root, &outside));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod hosts_temp_file_tests {
+    use super::*;
+
+    #[test]
+    fn locked_temp_file_rejects_writes_and_allows_reads() {
+        let path = unique_temp_path("zapret-lock-test", "txt");
+        let guard = create_locked_temp_file(&path, b"payload").expect("create");
+        assert!(
+            fs::OpenOptions::new().write(true).open(&path).is_err(),
+            "второй дескриптор не должен получить запись"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"payload".to_vec());
+        drop(guard);
+        let _ = fs::remove_file(&path);
     }
 }

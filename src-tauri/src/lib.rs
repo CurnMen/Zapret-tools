@@ -30,6 +30,69 @@ pub struct TrashItem {
     pub deleted_lines: Vec<String>,
 }
 
+/// Отклонённое предложение словаря.
+///
+/// Хранит не только набранное слово, но и пару перевода: иначе случайный
+/// отказ нельзя отменить и вернуть предложение в список.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct DeclinedWord {
+    pub original: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_russian: Option<bool>,
+}
+
+impl DeclinedWord {
+    fn matches(&self, normalized: &str) -> bool {
+        normalize_for_lookup(&self.original) == normalized
+            || self
+                .translated
+                .as_deref()
+                .is_some_and(|word| normalize_for_lookup(word) == normalized)
+    }
+}
+
+/// Старые конфиги хранят отклонённые слова простыми строками.
+/// Читаем оба формата, чтобы обновление не теряло список.
+fn deserialize_declined_words<'de, D>(deserializer: D) -> Result<Vec<DeclinedWord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawDeclined {
+        Pair {
+            original: String,
+            #[serde(default)]
+            translated: Option<String>,
+            #[serde(default)]
+            to_russian: Option<bool>,
+        },
+        Word(String),
+    }
+
+    Ok(Vec::<RawDeclined>::deserialize(deserializer)?
+        .into_iter()
+        .map(|raw| match raw {
+            RawDeclined::Word(original) => DeclinedWord {
+                original,
+                translated: None,
+                to_russian: None,
+            },
+            RawDeclined::Pair {
+                original,
+                translated,
+                to_russian,
+            } => DeclinedWord {
+                original,
+                translated,
+                to_russian,
+            },
+        })
+        .collect())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
@@ -50,8 +113,8 @@ pub struct Config {
     #[serde(default)]
     pub switcher_custom_dict_en: Vec<String>,
     /// Слова, добавление которых пользователь отклонил: больше не предлагаем.
-    #[serde(default)]
-    pub switcher_declined_words: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_declined_words")]
+    pub switcher_declined_words: Vec<DeclinedWord>,
     /// Автопроверка обновлений самой программы при старте.
     /// У старых конфигов поля нет — тогда считаем, что проверка включена.
     #[serde(default = "default_true")]
@@ -1180,7 +1243,7 @@ pub struct SwitcherState {
     pub custom_dict_ru: Vec<String>,
     pub custom_dict_en: Vec<String>,
     /// Слова, добавление которых пользователь отклонил.
-    pub declined_words: Vec<String>,
+    pub declined_words: Vec<DeclinedWord>,
     pub admin: bool,
 }
 
@@ -1266,7 +1329,7 @@ fn remove_switcher_word_exclusion(
 pub struct CustomWordsState {
     pub ru: Vec<String>,
     pub en: Vec<String>,
-    pub declined: Vec<String>,
+    pub declined: Vec<DeclinedWord>,
 }
 
 const CUSTOM_WORD_LIMIT: usize = 500;
@@ -1320,8 +1383,7 @@ fn add_custom_word(
         }
     }
     // Если слово когда-то отклоняли, ручное добавление отменяет отказ.
-    s.declined_words
-        .retain(|w| normalize_for_lookup(w) != normalized);
+    s.declined_words.retain(|w| !w.matches(&normalized));
     Ok(snapshot_custom_words(&s))
 }
 
@@ -1348,15 +1410,25 @@ fn remove_custom_word(
 fn decline_custom_word(
     state: tauri::State<Arc<Mutex<SwitcherState>>>,
     word: String,
-) -> Vec<String> {
+    translated: Option<String>,
+    to_russian: Option<bool>,
+) -> Vec<DeclinedWord> {
     let word = word.trim().to_string();
     if word.is_empty() {
         return lock_switcher(&state).declined_words.clone();
     }
     let normalized = normalize_for_lookup(&word);
     let mut s = lock_switcher(&state);
-    if !list_contains_normalized(&s.declined_words, &normalized) {
-        s.declined_words.push(word);
+    if !s.declined_words.iter().any(|w| w.matches(&normalized)) {
+        // Пустой перевод не сохраняем: вернуть такое предложение не получится.
+        let translated = translated
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        s.declined_words.push(DeclinedWord {
+            original: word,
+            translated,
+            to_russian,
+        });
         if s.declined_words.len() > CUSTOM_WORD_LIMIT {
             let extra = s.declined_words.len() - CUSTOM_WORD_LIMIT;
             s.declined_words.drain(0..extra);
@@ -1366,10 +1438,36 @@ fn decline_custom_word(
 }
 
 #[tauri::command]
-fn clear_declined_words(state: tauri::State<Arc<Mutex<SwitcherState>>>) -> Vec<String> {
+fn clear_declined_words(state: tauri::State<Arc<Mutex<SwitcherState>>>) -> Vec<DeclinedWord> {
     let mut s = lock_switcher(&state);
     s.declined_words.clear();
     Vec::new()
+}
+
+/// Результат снятия отказа: обновлённый список и снятая запись,
+/// чтобы интерфейс мог сразу вернуть предложение в очередь.
+#[derive(Debug, Serialize)]
+pub struct DeclinedUpdate {
+    pub declined: Vec<DeclinedWord>,
+    pub removed: Option<DeclinedWord>,
+}
+
+#[tauri::command]
+fn remove_declined_word(
+    state: tauri::State<Arc<Mutex<SwitcherState>>>,
+    word: String,
+) -> DeclinedUpdate {
+    let normalized = normalize_for_lookup(&word);
+    let mut s = lock_switcher(&state);
+    let removed = s
+        .declined_words
+        .iter()
+        .position(|w| w.matches(&normalized))
+        .map(|index| s.declined_words.remove(index));
+    DeclinedUpdate {
+        declined: s.declined_words.clone(),
+        removed,
+    }
 }
 
 #[tauri::command]
@@ -1963,13 +2061,19 @@ fn custom_word_suggestion(
     {
         return None;
     }
-    if list_contains_normalized(&state.declined_words, &original_norm)
-        || list_contains_normalized(&state.declined_words, &translated_norm)
+    if state
+        .declined_words
+        .iter()
+        .any(|word| word.matches(&original_norm) || word.matches(&translated_norm))
     {
         return None;
     }
 
-    Some((original.to_string(), translated.to_string(), !source_russian))
+    Some((
+        original.to_string(),
+        translated.to_string(),
+        !source_russian,
+    ))
 }
 
 /// Окно между нажатиями Shift для Double Shift.
@@ -4449,7 +4553,7 @@ pub fn run() {
             update_switcher_config, get_switcher_config, start_switcher_listener,
             add_switcher_word_exclusion, remove_switcher_word_exclusion,
             get_custom_words, add_custom_word, remove_custom_word,
-            decline_custom_word, clear_declined_words,
+            decline_custom_word, remove_declined_word, clear_declined_words,
             get_running_processes,
             run_blockcheck, save_blockcheck_strategy,
             network::list_network_interfaces, network::get_dns_state,
@@ -4870,14 +4974,24 @@ mod switcher_tests {
         assert!(suggestion.2);
 
         // После отказа предложение больше не отправляется.
-        state.declined_words.push(pair_typed.to_string());
-        assert!(custom_word_suggestion(pair_typed, &pair_translated, false, &dicts, &state).is_none());
+        state.declined_words.push(DeclinedWord {
+            original: pair_typed.to_string(),
+            translated: Some(pair_translated.clone()),
+            to_russian: Some(true),
+        });
+        assert!(
+            custom_word_suggestion(pair_typed, &pair_translated, false, &dicts, &state).is_none()
+        );
 
         // Настоящее слово исходного языка не предлагаем.
-        assert!(
-            custom_word_suggestion("hello", &convert_layout("hello", true), false, &dicts, &state)
-                .is_none()
-        );
+        assert!(custom_word_suggestion(
+            "hello",
+            &convert_layout("hello", true),
+            false,
+            &dicts,
+            &state
+        )
+        .is_none());
     }
 
     #[test]
@@ -5063,5 +5177,38 @@ mod double_shift_tests {
         assert!(!is_double_shift(1_000, 1_100, false, true, false, false));
         assert!(!is_double_shift(1_000, 1_100, false, false, true, false));
         assert!(!is_double_shift(1_000, 1_100, false, false, false, true));
+    }
+}
+
+#[cfg(test)]
+mod declined_word_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_declined_words_deserialize_as_plain_words() {
+        // Конфиг прежних версий: массив строк без перевода.
+        let config: Config = serde_json::from_str(r#"{"switcher_declined_words":["мщщм"]}"#)
+            .expect("старый конфиг должен читаться");
+        assert_eq!(config.switcher_declined_words.len(), 1);
+        assert_eq!(config.switcher_declined_words[0].original, "мщщм");
+        assert!(config.switcher_declined_words[0].translated.is_none());
+    }
+
+    #[test]
+    fn declined_pair_survives_save_and_load() {
+        let config = Config {
+            switcher_declined_words: vec![DeclinedWord {
+                original: "мщщм".into(),
+                translated: Some("vjjk".into()),
+                to_russian: Some(true),
+            }],
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&config).expect("сериализация");
+        let parsed: Config = serde_json::from_str(&text).expect("десериализация");
+        assert_eq!(
+            parsed.switcher_declined_words,
+            config.switcher_declined_words
+        );
     }
 }

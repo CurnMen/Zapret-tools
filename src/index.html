@@ -263,6 +263,8 @@
 
     .field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
     .field-label { font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); }
+    .field-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 30px; }
+    .field-head .btn { margin-left: auto; }
     .switcher-body { display: flex; flex-direction: column; gap: 16px; }
     .switcher-head-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .exception-empty { padding: 10px 8px; color: var(--text-3); font: 400 12px/18px var(--font-ui); }
@@ -286,9 +288,27 @@
     .custom-dict-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
     .custom-dict-column { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
     .custom-dict-title { font-size: 11px; line-height: 16px; color: var(--text-3); }
+    .list-bounded { max-height: 220px; overflow-y: auto; }
+    #switcherExceptions, #switcherWordExceptions { max-height: 220px; overflow-y: auto; }
+    [hidden] { display: none !important; }
+    .word-badge { margin-left: 6px; padding: 1px 4px; border-radius: 4px; background: var(--surface-raised); color: var(--text-3); font: 500 9px/13px var(--font-ui); vertical-align: 1px; }
+    .chip-list { display: flex; flex-wrap: wrap; gap: 4px; }
+    .chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 4px 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-raised); font: 400 11px/16px var(--font-mono); color: var(--text-2); }
+    .chip-text { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chip-x { display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text-3); cursor: pointer; }
+    .chip-x:hover { background: var(--surface-hover); color: var(--accent); }
+    .chip-x .icon { width: 11px; height: 11px; }
+    .suggestion-actions { display: flex; align-items: center; gap: 2px; }
+    .suggestion-source { color: var(--text-3); }
+    .tab-badge { min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: #10131a; font: 600 10px/16px var(--font-ui); text-align: center; }
     .exception-list { display: flex; flex-direction: column; gap: 1px; padding: 4px; background: var(--input); border: 1px solid var(--line); border-radius: var(--radius); }
     .exception-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0 4px 0 8px; border-radius: 5px; font: 400 12px/16px var(--font-mono); color: var(--text-2); }
     .exception-row:hover { background: var(--surface-raised); }
+    /* Списки свитчера одной высоты: длинные слова не растягивают строку. */
+    .list-compact .exception-row { height: 32px; }
+    .list-compact .exception-row > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .list-compact .exception-row .btn-sm { height: 24px; padding: 0 8px; font-size: 11px; }
+    .list-compact .exception-row .icon-btn { width: 24px; height: 24px; }
     .notice { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: var(--surface-raised); border: 1px solid var(--line); border-radius: var(--radius); font-size: 12px; line-height: 18px; color: var(--text-3); }
     .notice .icon { width: 14px; height: 14px; margin-top: 2px; color: var(--warning); }
     .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); }
@@ -571,6 +591,7 @@
     <button class="tab" role="tab" aria-selected="false" aria-controls="tab-switcher" data-tab="switcher">
       <svg class="icon"><use href="#i-keyboard"></use></svg>
       Свитчер
+      <span class="tab-badge" id="switcherSuggestBadge" hidden></span>
     </button>
     <button class="tab" role="tab" aria-selected="false" aria-controls="tab-network" data-tab="network">
       <svg class="icon"><use href="#i-settings"></use></svg>
@@ -804,7 +825,7 @@
             </div>
             <div class="process-list" id="switcherProcessList"></div>
           </div>
-          <div class="exception-list" id="switcherExceptions"></div>
+          <div class="exception-list list-compact" id="switcherExceptions"></div>
           <p class="hint">Double Shift конвертирует последнее слово или выделенный текст. В приложениях из списка свитчер не работает.</p>
         </div>
 
@@ -817,7 +838,7 @@
               Добавить
             </button>
           </div>
-          <div class="exception-list" id="switcherWordExceptions"></div>
+          <div class="exception-list list-compact" id="switcherWordExceptions"></div>
           <p class="hint">Эти слова свитчер не исправляет. Если автозамена ошиблась, нажмите Backspace дважды сразу после неё — появится предложение добавить слово сюда.</p>
         </div>
 
@@ -834,7 +855,6 @@
                   Добавить
                 </button>
               </div>
-              <div class="exception-list" id="customDictRuList"></div>
             </div>
             <div class="custom-dict-column">
               <span class="custom-dict-title">Английские слова</span>
@@ -845,13 +865,29 @@
                   Добавить
                 </button>
               </div>
-              <div class="exception-list" id="customDictEnList"></div>
             </div>
           </div>
-          <div class="inline-field actions-wrap" style="align-items:center;">
-            <button class="btn btn-ghost btn-sm" type="button" id="clearDeclinedWordsBtn">Сбросить отклонённые предложения</button>
-            <span class="hint" id="declinedWordsHint">Отклонённых предложений: 0</span>
+          <div class="exception-list list-bounded list-compact" id="customDictList"></div>
+        </div>
+
+        <div class="field" id="customSuggestionsField" hidden>
+          <div class="field-head">
+            <span class="field-label">Предложения словаря</span>
+            <span class="hint" id="customSuggestionsCount"></span>
+            <button class="btn btn-ghost btn-sm" type="button" id="customSuggestionsAddAll">Добавить все</button>
           </div>
+          <div class="exception-list list-bounded list-compact" id="customSuggestionsList"></div>
+          <p class="hint">Слова переведены, но их нет в словарях. «Добавить» сохранит перевод, «Скрыть» — больше не предлагать.</p>
+        </div>
+
+        <div class="field" id="customDeclinedField" hidden>
+          <div class="field-head">
+            <span class="field-label">Отклонённые предложения</span>
+            <span class="hint" id="declinedWordsHint"></span>
+            <button class="btn btn-ghost btn-sm" type="button" id="clearDeclinedWordsBtn" title="Убрать все отказы">Очистить</button>
+          </div>
+          <div class="chip-list" id="declinedList"></div>
+          <p class="hint">Нажмите ↺, чтобы снять отказ и вернуть слово в предложения.</p>
         </div>
 
         <div class="notice">
@@ -1309,7 +1345,7 @@
 
   restoreWindowGeometry().then(watchWindowGeometry);
 
-  let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null, trashFiles: [], switcherEnabled: false, switcherExclusions: [], switcherWordExclusions: [], customDictRu: [], customDictEn: [], declinedWords: [], switcherDictionariesReady: false, switcherAdmin: true, switcherAdminWarned: false, switcherEventsBound: false, switcherProcesses: [], autoCheckUpdates: true, hostsEntries: [], tools: [], toolProcesses: [] };
+  let state = { rootPath: null, activeVersion: null, versions: [], currentListFile: null, runningWinwsPath: null, trashFiles: [], switcherEnabled: false, switcherExclusions: [], switcherWordExclusions: [], customDictRu: [], customDictEn: [], declinedWords: [], suggestions: [], switcherDictionariesReady: false, switcherAdmin: true, switcherAdminWarned: false, switcherEventsBound: false, switcherProcesses: [], autoCheckUpdates: true, hostsEntries: [], tools: [], toolProcesses: [] };
 
   function setAutostartUI(on) {
     $id('btnAutostartLabel').textContent = on ? 'Автозапуск: вкл' : 'Автозапуск: выкл';
@@ -2288,27 +2324,105 @@
       </div>`).join('');
     }
 
-    renderCustomDictList('customDictRuList', state.customDictRu, 'ru');
-    renderCustomDictList('customDictEnList', state.customDictEn, 'en');
+    renderCustomDictList();
 
-    const declinedHint = $id('declinedWordsHint');
-    if (declinedHint) {
-      declinedHint.textContent = `Отклонённых предложений: ${state.declinedWords.length}`;
-    }
-    const clearDeclined = $id('clearDeclinedWordsBtn');
-    if (clearDeclined) clearDeclined.disabled = state.declinedWords.length === 0;
+    renderSwitcherSuggestions();
+    renderDeclinedWords();
   }
 
-  function renderCustomDictList(containerId, words, language) {
-    const list = $id(containerId);
+  // ---- Очередь предложений словаря ----
+  // Тосты живут 12 секунд и исчезают, поэтому каждое предложение остаётся
+  // в списке: за десяток переводов подряд ничего не теряется.
+  const SUGGESTION_LIMIT = 30;
+
+  function addSwitcherSuggestion(original, translated, toRussian) {
+    if (!original || !translated) return;
+    const exists = state.suggestions.some(
+      (item) => item.original === original && item.translated === translated
+    );
+    if (!exists) {
+      state.suggestions.push({ original, translated, toRussian });
+      if (state.suggestions.length > SUGGESTION_LIMIT) state.suggestions.shift();
+      renderSwitcherSuggestions();
+    }
+  }
+
+  function removeSwitcherSuggestion(original, translated) {
+    const before = state.suggestions.length;
+    state.suggestions = state.suggestions.filter(
+      (item) => !(item.original === original && item.translated === translated)
+    );
+    if (state.suggestions.length !== before) renderSwitcherSuggestions();
+  }
+
+  function renderSwitcherSuggestions() {
+    const field = $id('customSuggestionsField');
+    const list = $id('customSuggestionsList');
+    if (!field || !list) return;
+    const count = state.suggestions.length;
+    field.hidden = count === 0;
+
+    const badge = $id('switcherSuggestBadge');
+    if (badge) {
+      badge.hidden = count === 0;
+      badge.textContent = String(count);
+    }
+    const counter = $id('customSuggestionsCount');
+    if (counter) counter.textContent = count ? `всего: ${count}` : '';
+    const addAll = $id('customSuggestionsAddAll');
+    if (addAll) addAll.disabled = count === 0;
+
+    if (!count) {
+      list.innerHTML = '';
+      return;
+    }
+    list.innerHTML = state.suggestions.map((item, index) => `
+      <div class="exception-row">
+        <span>${escapeHtml(item.translated)}<span class="suggestion-source"> ← ${escapeHtml(item.original)}</span></span>
+        <span class="suggestion-actions">
+          <button class="btn btn-ghost btn-sm" type="button" data-suggestion-add="${index}">Добавить</button>
+          <button class="icon-btn" type="button" data-suggestion-skip="${index}" aria-label="Скрыть предложение">
+            <svg class="icon"><use href="#i-x"></use></svg>
+          </button>
+        </span>
+      </div>`).join('');
+  }
+
+  // Отклонённые слова показаны компактными чипами: отказ мог быть случайным,
+  // поэтому у каждого чипа есть «↺» — снять отказ и вернуть предложение.
+  function renderDeclinedWords() {
+    const field = $id('customDeclinedField');
+    const list = $id('declinedList');
+    if (!field || !list) return;
+    const count = state.declinedWords.length;
+    field.hidden = count === 0;
+    const hint = $id('declinedWordsHint');
+    if (hint) hint.textContent = `всего: ${count}`;
+    const clear = $id('clearDeclinedWordsBtn');
+    if (clear) clear.disabled = count === 0;
+    list.innerHTML = state.declinedWords.map((entry, index) => `
+      <span class="chip" title="${escapeHtml(entry.original)}">
+        <span class="chip-text">${escapeHtml(entry.original)}</span>
+        <button class="chip-x" type="button" data-declined-index="${index}" aria-label="Вернуть слово в предложения" title="Вернуть в предложения">
+          <svg class="icon"><use href="#i-rotate"></use></svg>
+        </button>
+      </span>`).join('');
+  }
+
+  function renderCustomDictList() {
+    const list = $id('customDictList');
     if (!list) return;
-    if (!words.length) {
+    const rows = [
+      ...state.customDictRu.map((word) => ({ word, language: 'ru' })),
+      ...state.customDictEn.map((word) => ({ word, language: 'en' }))
+    ];
+    if (!rows.length) {
       list.innerHTML = '<div class="exception-empty">Слов нет</div>';
       return;
     }
-    list.innerHTML = words.map((word, index) => `
+    list.innerHTML = rows.map(({ word, language }) => `
       <div class="exception-row">
-        <span>${escapeHtml(word)}</span>
+        <span>${escapeHtml(word)}<span class="word-badge">${language.toUpperCase()}</span></span>
         <button class="icon-btn" type="button" data-custom-word="${escapeHtml(word)}" data-custom-language="${language}" aria-label="Удалить слово из словаря">
           <svg class="icon"><use href="#i-x"></use></svg>
         </button>
@@ -2326,7 +2440,12 @@
       switcher_word_exclusions: state.switcherWordExclusions.slice(),
       switcher_custom_dict_ru: state.customDictRu.slice(),
       switcher_custom_dict_en: state.customDictEn.slice(),
-      switcher_declined_words: state.declinedWords.slice(),
+      // Бэкенд ждёт snake_case: в состоянии поле хранится как toRussian.
+      switcher_declined_words: state.declinedWords.map((entry) => ({
+        original: entry.original,
+        translated: entry.translated,
+        to_russian: entry.toRussian
+      })),
       auto_check_updates: state.autoCheckUpdates
     };
   }
@@ -2400,17 +2519,25 @@
       // to_russian === false означает, что переведённое слово английское.
       const toRussian = payload.to_russian !== false;
 
-      showToast(`Слово «${original}» переведено. Добавить в словарь?`, 'info', {
+      addSwitcherSuggestion(original, translated, toRussian);
+
+      showToast(`Слово «${translated}» переведено. Добавить в словарь?`, 'info', {
         actionLabel: 'Добавить',
         cancelLabel: 'Отмена',
         timeout: 12000,
         onAction: async () => {
-          if (await addCustomWordPair(original, translated, toRussian)) {
-            showToast(`«${original}» и «${translated}» добавлены в словарь.`, 'success');
+          // В словарь идёт только переведённое слово: исходный набор
+          // («мщщм») — опечатка, ему там не место.
+          if (await addSuggestedCustomWord(translated, toRussian)) {
+            removeSwitcherSuggestion(original, translated);
+            showToast(`Слово «${translated}» добавлено в словарь.`, 'success');
           }
         },
         // Закрытие тоста без «Добавить» = отказ: больше не предлагаем.
-        onDismiss: () => { declineCustomWord(original); }
+        onDismiss: () => {
+          removeSwitcherSuggestion(original, translated);
+          declineCustomWord(original, translated, toRussian);
+        }
       });
     });
   }
@@ -2440,9 +2567,7 @@
         state.customDictEn = Array.isArray(config.switcher_custom_dict_en)
           ? config.switcher_custom_dict_en.slice()
           : [];
-        state.declinedWords = Array.isArray(config.switcher_declined_words)
-          ? config.switcher_declined_words.slice()
-          : [];
+        state.declinedWords = normalizeDeclinedWords(config.switcher_declined_words);
       }
       if (cfg) {
         state.switcherDictionariesReady = !!cfg.dictionaries_ready;
@@ -2542,11 +2667,28 @@
 
   // ---- Пользовательский словарь и отклонённые предложения ----
 
+  // Отклонённые предложения хранят пару слов; строки из старых конфигов
+  // приводим к тому же виду, чтобы остальной код работал с одним форматом.
+  function normalizeDeclinedWords(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map((entry) => {
+      if (typeof entry === 'string') {
+        return { original: entry, translated: null, toRussian: null };
+      }
+      if (!entry || typeof entry !== 'object' || typeof entry.original !== 'string') return null;
+      return {
+        original: entry.original,
+        translated: typeof entry.translated === 'string' ? entry.translated : null,
+        toRussian: typeof entry.to_russian === 'boolean' ? entry.to_russian : null
+      };
+    }).filter(Boolean);
+  }
+
   function applyCustomWords(data) {
     if (!data || typeof data !== 'object') return;
     if (Array.isArray(data.ru)) state.customDictRu = data.ru.slice();
     if (Array.isArray(data.en)) state.customDictEn = data.en.slice();
-    if (Array.isArray(data.declined)) state.declinedWords = data.declined.slice();
+    if (Array.isArray(data.declined)) state.declinedWords = normalizeDeclinedWords(data.declined);
     renderSwitcher();
   }
 
@@ -2576,27 +2718,29 @@
   }
 
   /// Добавляет пару «исходное — переведённое» в словари обоих языков.
-  async function addCustomWordPair(original, translated, toRussian) {
-    const target = toRussian ? 'ru' : 'en';
-    const source = toRussian ? 'en' : 'ru';
+  async function addSuggestedCustomWord(word, toRussian, persist = true) {
+    const language = toRussian ? 'ru' : 'en';
     try {
-      await invoke('add_custom_word', { word: translated, language: target });
-      const data = await invoke('add_custom_word', { word: original, language: source });
+      const data = await invoke('add_custom_word', { word, language });
       applyCustomWords(data);
-      await persistConfig();
+      if (persist) await persistConfig();
       return true;
     } catch (e) {
-      showToast('Не удалось добавить слова в словарь: ' + e, 'error');
+      showToast('Не удалось добавить слово в словарь: ' + e, 'error');
       return false;
     }
   }
 
-  async function declineCustomWord(word) {
+  async function declineCustomWord(word, translated, toRussian) {
     const value = String(word || '').trim();
     if (!value) return;
     try {
-      const updated = await invoke('decline_custom_word', { word: value });
-      state.declinedWords = Array.isArray(updated) ? updated : state.declinedWords;
+      const updated = await invoke('decline_custom_word', {
+        word: value,
+        translated: translated ? String(translated) : null,
+        toRussian: typeof toRussian === 'boolean' ? toRussian : null
+      });
+      state.declinedWords = normalizeDeclinedWords(updated);
       renderSwitcher();
       await persistConfig();
     } catch (e) {
@@ -2760,9 +2904,72 @@
     btn.disabled = true;
     await removeCustomWord(btn.dataset.customLanguage, btn.dataset.customWord);
   };
-  $id('customDictRuList').addEventListener('click', handleCustomDictRemove);
-  $id('customDictEnList').addEventListener('click', handleCustomDictRemove);
+  $id('customDictList').addEventListener('click', handleCustomDictRemove);
   $id('clearDeclinedWordsBtn').onclick = () => clearDeclinedWords();
+
+  $id('customSuggestionsList').addEventListener('click', async (event) => {
+    const addBtn = event.target.closest('[data-suggestion-add]');
+    const skipBtn = event.target.closest('[data-suggestion-skip]');
+    const button = addBtn || skipBtn;
+    if (!button || button.disabled) return;
+    const index = Number(addBtn ? addBtn.dataset.suggestionAdd : button.dataset.suggestionSkip);
+    if (!Number.isInteger(index) || index < 0 || index >= state.suggestions.length) return;
+    const item = state.suggestions[index];
+    if (!item) return;
+    button.disabled = true;
+    if (addBtn) {
+      if (await addSuggestedCustomWord(item.translated, item.toRussian)) {
+        removeSwitcherSuggestion(item.original, item.translated);
+      }
+    } else {
+      await declineCustomWord(item.original, item.translated, item.toRussian);
+      removeSwitcherSuggestion(item.original, item.translated);
+    }
+  });
+
+  $id('customSuggestionsAddAll').onclick = async () => {
+    const button = $id('customSuggestionsAddAll');
+    if (button.disabled || !state.suggestions.length) return;
+    button.disabled = true;
+    const items = state.suggestions.slice();
+    let added = 0;
+    for (const item of items) {
+      if (await addSuggestedCustomWord(item.translated, item.toRussian, false)) added += 1;
+    }
+    state.suggestions = [];
+    renderSwitcherSuggestions();
+    await persistConfig();
+    showToast(added ? `В словарь добавлено слов: ${added}.` : 'Ничего не добавлено.', added ? 'success' : 'info');
+    button.disabled = false;
+  };
+
+  $id('declinedList').addEventListener('click', async (event) => {
+    const btn = event.target.closest('[data-declined-index]');
+    if (!btn || btn.disabled) return;
+    const index = Number(btn.dataset.declinedIndex);
+    const entry = state.declinedWords[index];
+    if (!entry) return;
+    btn.disabled = true;
+    try {
+      const result = await invoke('remove_declined_word', { word: entry.original });
+      state.declinedWords = normalizeDeclinedWords(result?.declined);
+      const removed = result?.removed;
+      const restored = removed
+        && typeof removed.translated === 'string' && removed.translated
+        && typeof removed.to_russian === 'boolean';
+      if (restored) {
+        addSwitcherSuggestion(removed.original, removed.translated, removed.to_russian);
+      }
+      renderSwitcher();
+      await persistConfig();
+      showToast(
+        restored ? 'Слово возвращено в предложения.' : 'Отказ снят: слово снова может быть предложено.',
+        'info'
+      );
+    } catch (e) {
+      showToast('Не удалось убрать отказ: ' + e, 'error');
+    }
+  });
 
   // ---- Сеть: DNS, DoH и блокировка QUIC ----
   const DNS_PRESETS = {

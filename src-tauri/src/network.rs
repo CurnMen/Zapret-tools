@@ -70,8 +70,8 @@ struct SystemAdapter {
 #[cfg(windows)]
 fn system_adapters() -> Option<Vec<SystemAdapter>> {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST,
-        IP_ADAPTER_ADDRESSES_LH,
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST,
+        GAA_FLAG_SKIP_UNICAST, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
@@ -90,7 +90,8 @@ fn system_adapters() -> Option<Vec<SystemAdapter>> {
         storage.resize((size as usize).div_ceil(8), 0);
         let head = storage.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
         // SAFETY: буфер выровнен под u64 и не меньше затребованного API размера.
-        code = unsafe { GetAdaptersAddresses(AF_UNSPEC.0 as u32, flags, None, Some(head), &mut size) };
+        code =
+            unsafe { GetAdaptersAddresses(AF_UNSPEC.0 as u32, flags, None, Some(head), &mut size) };
         if code == 0 {
             break;
         }
@@ -197,10 +198,7 @@ fn get_dns_state_blocking(interface_name: &str) -> Result<Vec<String>, String> {
     }) {
         // Интерфейс найден: пустой список — это DNS по DHCP, а не ошибка.
         // IPv6 отбрасываем — в окне показываются IPv4-серверы, как и раньше.
-        return Ok(dns
-            .into_iter()
-            .filter(|ip| !ip.contains(':'))
-            .collect());
+        return Ok(dns.into_iter().filter(|ip| !ip.contains(':')).collect());
     }
 
     // Резерв, если IP Helper не ответил.
@@ -337,8 +335,7 @@ fn firewall_rule_enabled(name: &str) -> Option<bool> {
         INetFwPolicy2, INetFwRule, INetFwRules, NetFwPolicy2,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
-        COINIT_APARTMENTTHREADED,
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
 
     /// Освобождает COM-апартамент, если именно мы его инициализировали.
@@ -382,4 +379,3 @@ fn get_quic_block_state_blocking() -> bool {
     );
     matches!(run_powershell(&script), Ok(out) if out.contains("YES"))
 }
-

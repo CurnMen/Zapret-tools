@@ -148,4 +148,3 @@ pub(crate) fn switcher_log(message: impl AsRef<str>) {
         let _ = file.write_all(line.as_bytes());
     }
 }
-

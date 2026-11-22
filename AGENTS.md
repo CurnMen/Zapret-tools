@@ -16,7 +16,7 @@ Zapret (Flowseal). Tauri 2 + Rust, фронтенд — один HTML-файл �
 | Задача | Команда | Ожидаемо |
 |---|---|---|
 | Проверка типов | `cd src-tauri && cargo check` | exit 0, без предупреждений |
-| Тесты | `cd src-tauri && cargo test --lib` | `40 passed; 0 failed` |
+| Тесты | `cd src-tauri && cargo test --lib` | `44 passed; 0 failed` |
 | Dev-запуск | `npm run tauri dev` | окно + консоль (в debug-сборке `eprintln!` виден в терминале) |
 | Релиз + инсталлятор | `npm run tauri build` | `Finished release` + NSIS |
 | Лог свитчера | `%TEMP%\zapret-tools-switcher.log` | пишется всегда, в том числе в релизе; при 2 МБ уезжает в `.log.1` |
@@ -76,8 +76,9 @@ Zapret (Flowseal). Tauri 2 + Rust, фронтенд — один HTML-файл �
 
 ### `src-tauri/src/win_cmd.rs` (~130 строк) — внешние процессы
 
-`hide_console` (`CREATE_NO_WINDOW`), `ps_quote`, `run_powershell` (UTF-8, без прав),
-`run_elevated_script` (UAC, результат через временный файл).
+`hide_console` (`CREATE_NO_WINDOW`), `ps_quote`, `decode_console_output` (UTF-8 → OEM),
+`run_powershell` (UTF-8, без прав), `run_elevated_script` (UAC, результат через временный
+файл, код передаётся через `-EncodedCommand`).
 
 ### `src-tauri/src/network.rs` (~385 строк) — сеть
 
@@ -109,7 +110,9 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 1. **Фронтенд без фреймворков и сборки.** Никаких React/Vue/npm-пакетов в `src/`.
 2. **Никаких видимых консольных окон.** Любой `Command::new("cmd"/"powershell"/...)`
    оборачивается в `hide_console(&mut command)` (`CREATE_NO_WINDOW`). Исключение —
-   UAC-путь: `run_elevated_script` (там окно нужно для запроса прав).
+   UAC-путь: `run_elevated_script` (там окно нужно для запроса прав). Тело скрипта
+   передаётся через `-EncodedCommand` (UTF-16LE + Base64), без файла в `%TEMP%` —
+   иначе его можно подменить до нажатия «Да» в UAC (TOCTOU).
 3. **Не ломать `showConfirm()`** и передачу `rootPath`/`versionPath` с фронтенда —
    на них завязаны все файловые операции.
 4. **Боевых `unwrap()`/`expect()` в рабочем коде нет.** Ошибки — `Result<_, String>` для
@@ -136,6 +139,10 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 12. **Команды из подмодулей регистрируются по полному пути**:
     `generate_handler![network::list_network_interfaces, ...]`. Модуль должен быть
     `pub(crate) mod`, иначе макрос не найдёт сгенерированный обработчик.
+13. **Вывод внешних процессов декодируется через `decode_console_output`.** PowerShell 5.1
+    при перенаправлении stdout/stderr пишет OEM-кодировку (cp866), а не UTF-8; чтение
+    «как UTF-8» превращает кириллицу в `����`. Функция сначала пробует UTF-8, затем
+    `MultiByteToWideChar(CP_OEMCP)`.
 
 ---
 
@@ -158,6 +165,20 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 - **Double Shift** — ровно два нажатия Shift в пределах 400 мс, между ними не было других
   клавиш и колеса, модификаторы не зажаты (`is_double_shift`). Автоповтор зажатого Shift
   вторым нажатием не считается.
+- **Очередь предложений словаря** — каждое событие `switcher-suggest-custom-word` попадает
+  в `state.suggestions` (лимит 30, дубликаты по паре слов склеиваются), а не только в тост:
+  тосты живут 12 секунд и исчезают, список — нет. Счётчик висит на вкладке «Свитчер».
+  «Добавить» сохраняет только переведённое слово; «Скрыть» и закрытие тоста вызывают
+  `decline_custom_word(original, translated, to_russian)`, поэтому пара больше не предлагается.
+- **Отклонённое можно вернуть.** `DeclinedWord` хранит `original`, `translated` и
+  `to_russian`; старые конфиги со строками читаются через `deserialize_declined_words`.
+  В интерфейсе это компактные чипы в отдельном блоке «Отклонённые предложения» (виден
+  и когда очередь предложений пуста), у каждого — «↺»: `remove_declined_word` снимает
+  отказ и возвращает пару в `state.suggestions`.
+- **Списки слов ограничены по высоте** (`.list-bounded`, 220 px): пользовательский словарь
+  RU/EN — один общий список с меткой языка, а не две колонки, поэтому сотня слов не
+  расталкивает вкладку «Свитчер». Строки `.exception-row` фиксированной высоты 32 px,
+  длинный текст обрезается многоточием — высота списков не «пляшет».
 
 ---
 
@@ -166,6 +187,14 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 - `src-tauri/tauri.conf.json`: `frontendDist: "../src"`, `withGlobalTauri: true`,
   `version: "../package.json"` (единственный источник версии), у окна `devtools: true`.
   В релизе DevTools требуют feature `devtools` в `Cargo.toml` (сейчас не включён намеренно).
+  `security.csp` — не `null`: инлайновые скрипты/стили разрешены, внешние источники закрыты,
+  IPC разрешён через `connect-src 'self' ipc: http://ipc.localhost`.
+- CI: `.github/workflows/ci.yml` на Windows — `cargo fmt --check`, `cargo clippy
+  --all-targets -D warnings`, `cargo test --lib`, `cargo build --release` (запускается
+  на push в `main`, пулл-реквестах и вручную).
+- `switcher_declined_words` в `config.json` — массив объектов
+  `{"original", "translated", "to_russian"}`; массив строк из старых версий читается
+  тем же полем и пересохраняется в новом формате.
 - `Cargo.toml` держит версию крейта (`1.0.0`) — она не равна версии приложения автоматически;
   при релизе править `package.json` и `CHANGELOG.md`.
 - `bundle.targets: ["nsis"]`, иконки в `src-tauri/icons/`.
@@ -211,7 +240,7 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 | ~~Вкладка «Сеть» медленная~~ | Решено в `64ffcd9`: IP Helper + COM, три запроса ~0,04 с (было 8,6 с). Резервные пути через PowerShell остались |
 | `lib.rs` всё ещё ~5060 строк | Первый этап разбиения сделан (`logs`, `win_cmd`, `network`). Дальше: `switcher.rs` (хук и правка), `hosts.rs`, `blockcheck.rs`, `versions.rs`. Двигать по одному модулю за коммит с прогоном тестов |
 | GUI не тестируется агентом | Окно Tauri недоступно инструментам браузера; проверка вкладок, свитчера и UAC — руками |
-| Updater и CSP не настроены | `security.csp: null`; при появлении внешнего контента задать CSP |
+| Updater не настроен, CSP настроен | `security.csp` закрывает внешние источники (остались инлайн-стили/скрипты). Плагин updater всё ещё без `check()`; эндпоинт `github.com/example/...` и pubkey-заглушка в конфиге |
 
 ---
 
@@ -242,3 +271,14 @@ HTML + CSS + JS в одном файле, состояние в объекте `
 | 2026-11-21 | 1.0.0 | Решения о восстановлении буфера и Double Shift вынесены в чистые функции и покрыты тестами (32 → 40) | `lib.rs` | `cargo test --lib` (40) |
 | 2026-11-21 | 1.0.0 | Версия из `package.json` (`tauri.conf.json` → `../package.json`), `CHANGELOG.md`; BOM из `package.json` убран | `tauri.conf.json`, `package.json`, `CHANGELOG.md` | `cargo check` (build-скрипт читает версию) |
 | 2026-11-21 | 1.0.0 | `logs.rs`, `win_cmd.rs`, `network.rs` вынесены из `lib.rs` (−630 строк), поведение не менялось | `lib.rs`, `logs.rs`, `win_cmd.rs`, `network.rs` | `cargo check`, `cargo test --lib` (40) |
+| 2026-11-21 | 1.0.0 | Авто-обновление hosts из Flowseal (блок между маркерами, запись через UAC) и запуск `utils\test zapret.ps1` со скрытым окном и вводом по умолчанию | `lib.rs`, `index.html` | `cargo test --lib` (41), превью всех вкладок |
+| 2026-11-21 | 1.0.0 | Пользовательский словарь RU/EN, запоминание отклонённых предложений, тост «Добавить в словарь?» | `lib.rs`, `index.html` | `cargo test --lib` (41), JS-синтаксис, ID-проверка |
+| 2026-11-21 | 1.0.0 | Закрыт TOCTOU в UAC: `run_elevated_script` передаёт код через `-EncodedCommand` вместо `.ps1` в `%TEMP%`; добавлен тест Base64 UTF-16LE | `win_cmd.rs` | `cargo test --lib` (41), живой UAC-прогон |
+| 2026-11-21 | 1.0.0 | CSP в `tauri.conf.json`: инлайн-стили/скрипты разрешены, внешние источники и `object-src` закрыты, IPC разрешён | `tauri.conf.json` | превью с meta-CSP по всем вкладкам, 0 ошибок консоли |
+| 2026-11-21 | 1.0.0 | GitHub Actions CI: fmt, clippy `-D warnings`, тесты, release-сборка на `windows-latest` | `.github/workflows/ci.yml` | локально `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --lib` (41) |
+| 2026-11-22 | 1.0.0 | Консоль: вывод PowerShell декодируется из OEM (cp866), а не только UTF-8 — кириллица в тестах больше не `����`; текст ошибки UAC пишется в отдельный UTF-8-файл | `win_cmd.rs`, `lib.rs`, `Cargo.toml` | `cargo test --lib` (42), байты cp866 в тесте |
+| 2026-11-22 | 1.0.0 | Предложение «Добавить в словарь?» добавляет только переведённое слово; исходная опечатка в словарь не попадает | `index.html` | JS-синтаксис, превью |
+| 2026-11-22 | 1.0.0 | Перед тестами Zapret появилось подтверждение (до 30 минут, остановка `winws`, IPSet `any`) | `index.html` | превью: «Отмена» — 0 вызовов, «Да» — 1 вызов |
+| 2026-11-22 | 1.0.0 | Очередь предложений словаря: список «Предложения словаря», счётчик на вкладке «Свитчер», «Добавить»/«Скрыть»/«Добавить все», дедупликация, лимит 30 | `index.html` | превью: 2 предложения, дубль, добавление из тоста, отказ, «Добавить все» (2 слова) |
+| 2026-11-22 | 1.0.0 | Словари RU/EN объединены в один список с меткой языка и ограничением высоты 220 px; список предложений и «отклонённые» собраны в одном блоке | `index.html` | превью: 2 слова, метки RU/EN, удаление, «Добавить все», `max-height: 220px` |
+| 2026-11-22 | 1.0.0 | Отклонённое предложение хранит пару слов и возвращается по «↺» (раньше `remove_declined_word` не существовала); отдельный компактный блок не пропадает вместе с очередью; строки списков — фиксированные 32 px | `lib.rs`, `index.html`, `AGENTS.md`, `CHANGELOG.md` | `cargo check`, `cargo test --lib` (44), JS-синтаксис |

@@ -3465,6 +3465,11 @@
     }
     const button = $id('runZapretTestsBtn');
     if (button.disabled) return;
+    const proceed = await showConfirm(
+      'Тесты Zapret идут до 30 минут: winws останавливается и запускается заново, ' +
+      'IPSet на время тестов переключается в режим any. Продолжить?'
+    );
+    if (!proceed) return;
     const spinner = $id('zapretTestsSpinner');
     const label = $id('zapretTestsLabel');
     const log = $id('versionsLog');

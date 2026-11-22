@@ -20,6 +20,82 @@ pub(crate) fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// Декодирует вывод консольного процесса.
+///
+/// PowerShell 5.1 при перенаправлении stdout/stderr пишет в OEM-кодировке
+/// (cp866), а не в UTF-8: кириллица иначе превращается в «����». Поэтому
+/// сначала пробуем UTF-8, затем OEM-кодировку системы.
+pub(crate) fn decode_console_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    #[cfg(windows)]
+    if let Some(text) = decode_oem(bytes) {
+        return text;
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+#[cfg(windows)]
+fn decode_oem(bytes: &[u8]) -> Option<String> {
+    use windows::Win32::Globalization::{
+        MultiByteToWideChar, CP_OEMCP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+    };
+
+    if bytes.len() > i32::MAX as usize {
+        return None;
+    }
+    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    let len = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, None) };
+    if len <= 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; len as usize];
+    let written = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, Some(&mut buffer)) };
+    if written <= 0 {
+        return None;
+    }
+    buffer.truncate(written as usize);
+    Some(String::from_utf16_lossy(&buffer))
+}
+
+/// Base64 от UTF-16LE для `-EncodedCommand`.
+///
+/// Скрипт передаётся прямо в аргументе процесса, а не через .ps1 в %TEMP%:
+/// файл в общей временной папке можно было подменить между записью и нажатием
+/// «Да» в UAC (TOCTOU), после чего код выполнялся бы с правами администратора.
+fn encode_powershell_command(script: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let value = (b0 << 16) | (b1 << 8) | b2;
+        encoded.push(ALPHABET[(value >> 18) as usize & 63] as char);
+        encoded.push(ALPHABET[(value >> 12) as usize & 63] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[(value >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[value as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    encoded
+}
+
 /// Запускает PowerShell без повышения прав и возвращает stdout (UTF-8).
 pub(crate) fn run_powershell(script: &str) -> Result<String, String> {
     let wrapped = format!(
@@ -29,13 +105,22 @@ pub(crate) fn run_powershell(script: &str) -> Result<String, String> {
     let mut command = Command::new("powershell");
     hide_console(&mut command);
     let output = command
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &wrapped])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &wrapped,
+        ])
         .output()
         .map_err(|e| format!("не удалось запустить PowerShell: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if stderr.is_empty() {
-            format!("PowerShell завершился с кодом {}", output.status.code().unwrap_or(-1))
+            format!(
+                "PowerShell завершился с кодом {}",
+                output.status.code().unwrap_or(-1)
+            )
         } else {
             stderr
         });
@@ -46,6 +131,9 @@ pub(crate) fn run_powershell(script: &str) -> Result<String, String> {
 /// Выполняет скрипт в отдельном процессе PowerShell с запросом UAC.
 /// Результат (успех/текст ошибки) скрипт пишет во временный файл, потому что
 /// `Start-Process -Verb RunAs` не умеет перенаправлять stdout.
+///
+/// Тело скрипта передаётся через `-EncodedCommand`, без файла в %TEMP%:
+/// так злоумышленник без прав админа не может подменить код до появления UAC.
 pub(crate) fn run_elevated_script(body: &str) -> Result<(), String> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -53,8 +141,10 @@ pub(crate) fn run_elevated_script(body: &str) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
     let base = format!("admin-{}-{seq}", std::process::id());
-    let script_path = dir.join(format!("{base}.ps1"));
     let result_path = dir.join(format!("{base}.log"));
+    let outer_path = dir.join(format!("{base}.outer.log"));
+    let _ = fs::remove_file(&result_path);
+    let _ = fs::remove_file(&outer_path);
 
     let script = format!(
         "$ErrorActionPreference = 'Stop'\r\n\
@@ -70,43 +160,57 @@ try {{\r\n\
         result = ps_quote(&result_path.to_string_lossy()),
         body = body
     );
-    // UTF-8 с BOM: PowerShell 5.1 иначе читает .ps1 как ANSI и ломает
-    // кириллицу в сообщениях об ошибках.
-    let mut script_bytes = Vec::with_capacity(script.len() + 3);
-    script_bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-    script_bytes.extend_from_slice(script.as_bytes());
-    fs::write(&script_path, script_bytes).map_err(|e| format!("{}: {e}", script_path.display()))?;
+    let encoded = encode_powershell_command(&script);
 
     let outer = format!(
         "try {{\r\n\
-$argList = '-NoProfile -ExecutionPolicy Bypass -File \"' + {script} + '\"'\r\n\
+$argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', {encoded})\r\n\
 $p = Start-Process powershell -Verb RunAs -PassThru -Wait -WindowStyle Hidden -ErrorAction Stop -ArgumentList $argList\r\n\
 exit $p.ExitCode\r\n\
 }} catch {{\r\n\
-[Console]::Error.WriteLine('ERR: ' + $_.Exception.Message)\r\n\
-exit 1\r\n\
+  ('ERR: ' + $_.Exception.Message) | Set-Content -LiteralPath {outer} -Encoding UTF8\r\n\
+  [Console]::Error.WriteLine('ERR: ' + $_.Exception.Message)\r\n\
+  exit 1\r\n\
 }}\r\n",
-        script = ps_quote(&script_path.to_string_lossy())
+        encoded = ps_quote(&encoded),
+        outer = ps_quote(&outer_path.to_string_lossy())
     );
     let mut command = Command::new("powershell");
     hide_console(&mut command);
     let output = command
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &outer])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &outer,
+        ])
         .output()
         .map_err(|e| format!("не удалось запустить PowerShell: {e}"))?;
 
     let report = fs::read_to_string(&result_path).unwrap_or_default();
     let report = report.trim_start_matches('\u{feff}').trim().to_string();
-    let _ = fs::remove_file(&script_path);
+    let outer_report = fs::read_to_string(&outer_path).unwrap_or_default();
+    let outer_report = outer_report
+        .trim_start_matches('\u{feff}')
+        .trim()
+        .to_string();
     let _ = fs::remove_file(&result_path);
+    let _ = fs::remove_file(&outer_path);
 
     if output.status.success() && report.starts_with("OK") {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stderr = stderr.strip_prefix("ERR:").map(str::trim).unwrap_or(&stderr).to_string();
+    let stderr = decode_console_output(&output.stderr).trim().to_string();
+    let stderr = stderr
+        .strip_prefix("ERR:")
+        .map(str::trim)
+        .unwrap_or(&stderr)
+        .to_string();
     let detail = if let Some(rest) = report.strip_prefix("ERR:") {
+        rest.trim().to_string()
+    } else if let Some(rest) = outer_report.strip_prefix("ERR:") {
         rest.trim().to_string()
     } else if !stderr.is_empty() {
         stderr
@@ -126,3 +230,28 @@ exit 1\r\n\
     Err(detail)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encodes_utf16le_base64_for_encoded_command() {
+        assert_eq!(encode_powershell_command(""), "");
+        // Так же, как [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(...)).
+        assert_eq!(encode_powershell_command("A"), "QQA=");
+        assert_eq!(encode_powershell_command("AB"), "QQBCAA==");
+        // «Й» = U+0419: байты UTF-16LE 19 04 -> Base64 GQQ=.
+        assert_eq!(encode_powershell_command("Й"), "GQQ=");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decodes_oem_console_output() {
+        // «Привет» в cp866 и та же строка в UTF-8.
+        let oem = [0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2];
+        assert_eq!(decode_console_output(&oem), "Привет");
+        assert_eq!(decode_console_output("Привет".as_bytes()), "Привет");
+        assert_eq!(decode_console_output(b"plain ascii"), "plain ascii");
+        assert_eq!(decode_console_output(&[]), "");
+    }
+}

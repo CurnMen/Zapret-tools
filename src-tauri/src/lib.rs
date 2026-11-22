@@ -218,7 +218,9 @@ fn is_valid_domain_body(body: &str, domain_regex: &regex::Regex) -> bool {
 }
 
 fn merge_dirs(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !dst.exists() { fs::create_dir_all(dst)?; }
+    if !dst.exists() {
+        fs::create_dir_all(dst)?;
+    }
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let path = entry.path();
@@ -226,7 +228,11 @@ fn merge_dirs(src: &Path, dst: &Path) -> std::io::Result<()> {
         if path.is_file() {
             if path.extension().and_then(|s| s.to_str()) == Some("txt") {
                 let old_text = fs::read_to_string(&path).unwrap_or_default();
-                let new_text = if dst_path.exists() { fs::read_to_string(&dst_path).unwrap_or_default() } else { String::new() };
+                let new_text = if dst_path.exists() {
+                    fs::read_to_string(&dst_path).unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 fs::write(&dst_path, merge_text(&old_text, &new_text))?;
             } else if !dst_path.exists() {
                 fs::copy(&path, &dst_path)?;
@@ -284,19 +290,30 @@ fn save_config(
 #[tauri::command]
 fn scan_versions(base_path: String) -> Result<Vec<VersionInfo>, String> {
     let path = Path::new(&base_path);
-    if !path.exists() { return Err("Path not found".into()); }
+    if !path.exists() {
+        return Err("Path not found".into());
+    }
     let mut versions = Vec::new();
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') || name == "zapret-data" { continue; }
+                if name.starts_with('.') || name == "zapret-data" {
+                    continue;
+                }
                 let has_service = p.join("service.bat").exists();
                 let has_winws = p.join("bin").join("winws.exe").exists();
-                let has_lists = p.join("lists").exists() || p.join("zapret-data").join("lists").exists();
+                let has_lists =
+                    p.join("lists").exists() || p.join("zapret-data").join("lists").exists();
                 if has_service || has_winws || has_lists {
-                    versions.push(VersionInfo { name, path: p.to_string_lossy().to_string(), has_service, has_winws, has_lists });
+                    versions.push(VersionInfo {
+                        name,
+                        path: p.to_string_lossy().to_string(),
+                        has_service,
+                        has_winws,
+                        has_lists,
+                    });
                 }
             }
         }
@@ -309,17 +326,26 @@ async fn find_running_winws() -> Option<String> {
     tokio::task::spawn_blocking(move || {
         let mut sys = System::new_all();
         sys.refresh_processes(ProcessesToUpdate::All, true);
-        for (_, process) in sys.processes() {
+        for process in sys.processes().values() {
             let name = process.name().to_string_lossy().to_lowercase();
             if name.contains("winws") {
                 if let Some(exe_path) = process.exe() {
-                    if !exe_path.to_string_lossy().is_empty() { return Some(exe_path.to_string_lossy().to_string()); }
+                    if !exe_path.to_string_lossy().is_empty() {
+                        return Some(exe_path.to_string_lossy().to_string());
+                    }
                 }
             }
         }
         let mut reg = Command::new("reg");
         hide_console(&mut reg);
-        let output = reg.args(&["query", "HKLM\\System\\CurrentControlSet\\Services\\zapret", "/v", "ImagePath"]).output();
+        let output = reg
+            .args([
+                "query",
+                "HKLM\\System\\CurrentControlSet\\Services\\zapret",
+                "/v",
+                "ImagePath",
+            ])
+            .output();
         if let Ok(out) = output {
             if out.status.success() {
                 let stdout = String::from_utf8_lossy(&out.stdout);
@@ -329,7 +355,9 @@ async fn find_running_winws() -> Option<String> {
                             let rest = &line[start_quote + 1..];
                             if let Some(end_quote) = rest.find('"') {
                                 let path = &rest[..end_quote];
-                                if path.contains("winws.exe") { return Some(path.to_string()); }
+                                if path.contains("winws.exe") {
+                                    return Some(path.to_string());
+                                }
                             }
                         }
                     }
@@ -337,12 +365,17 @@ async fn find_running_winws() -> Option<String> {
             }
         }
         None
-    }).await.unwrap_or(None)
+    })
+    .await
+    .unwrap_or(None)
 }
 
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
-    Command::new("explorer").arg(path).spawn().map_err(|e| e.to_string())?;
+    Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -352,7 +385,13 @@ fn run_as_admin(bat_path: String) -> Result<(), String> {
     let mut command = Command::new("powershell");
     hide_console(&mut command);
     command
-        .args(["-Command", &format!("Start-Process '{}' -Verb RunAs", bat_path.replace("'", "''"))])
+        .args([
+            "-Command",
+            &format!(
+                "Start-Process '{}' -Verb RunAs",
+                bat_path.replace("'", "''")
+            ),
+        ])
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -361,7 +400,9 @@ fn run_as_admin(bat_path: String) -> Result<(), String> {
 #[tauri::command]
 fn manage_service(version_path: String, action: String) -> Result<(), String> {
     let bat_path = Path::new(&version_path).join("service.bat");
-    if !bat_path.exists() { return Err("service.bat не найден".into()); }
+    if !bat_path.exists() {
+        return Err("service.bat не найден".into());
+    }
     let bat_str = bat_path.to_string_lossy().to_string();
     let cmd = match action.as_str() {
         "start" => "sc start zapret".to_string(),
@@ -396,7 +437,10 @@ async fn read_list_files(version_path: String) -> Result<Vec<FileInfo>, String> 
                         // Файлы больше 2 МБ не читаем: подсчёт строк по ним слишком долгий.
                         // 999999 — маркер «огромный файл» для фронтенда.
                         if size > 2 * 1024 * 1024 {
-                            files.push(FileInfo { name, lines: 999999 });
+                            files.push(FileInfo {
+                                name,
+                                lines: 999999,
+                            });
                             continue;
                         }
                         let mut lines = 0;
@@ -411,21 +455,34 @@ async fn read_list_files(version_path: String) -> Result<Vec<FileInfo>, String> 
         }
         files.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(files)
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 fn read_list_file(version_path: String, file_name: String) -> Result<String, String> {
     let p1 = Path::new(&version_path).join("lists").join(&file_name);
-    let p2 = Path::new(&version_path).join("zapret-data").join("lists").join(&file_name);
+    let p2 = Path::new(&version_path)
+        .join("zapret-data")
+        .join("lists")
+        .join(&file_name);
     let target = if p1.exists() { p1 } else { p2 };
     fs::read_to_string(target).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn write_list_file(root_path: String, version_path: String, file_name: String, content: String) -> Result<String, String> {
+fn write_list_file(
+    root_path: String,
+    version_path: String,
+    file_name: String,
+    content: String,
+) -> Result<String, String> {
     let p1 = Path::new(&version_path).join("lists").join(&file_name);
-    let p2 = Path::new(&version_path).join("zapret-data").join("lists").join(&file_name);
+    let p2 = Path::new(&version_path)
+        .join("zapret-data")
+        .join("lists")
+        .join(&file_name);
     let target = if p1.exists() { p1 } else { p2 };
 
     if !target.exists() {
@@ -442,17 +499,22 @@ fn write_list_file(root_path: String, version_path: String, file_name: String, c
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         let lower = trimmed.to_lowercase();
-        if seen.contains(&lower) { removed_count += 1; }
-        else {
+        if seen.contains(&lower) {
+            removed_count += 1;
+        } else {
             seen.insert(lower);
             cleaned_lines.push(trimmed.to_string());
         }
     }
 
     let mut new_lines_set = std::collections::HashSet::new();
-    for line in &cleaned_lines { new_lines_set.insert(line.to_lowercase()); }
+    for line in &cleaned_lines {
+        new_lines_set.insert(line.to_lowercase());
+    }
 
     let mut deleted_lines = Vec::new();
     for old_line in old_text.lines() {
@@ -464,7 +526,9 @@ fn write_list_file(root_path: String, version_path: String, file_name: String, c
 
     if !deleted_lines.is_empty() {
         let trash_dir = Path::new(&root_path).join("zapret_trash");
-        if !trash_dir.exists() { let _ = fs::create_dir_all(&trash_dir); }
+        if !trash_dir.exists() {
+            let _ = fs::create_dir_all(&trash_dir);
+        }
 
         // Часы могут быть сбиты (дата до 1970 года) — имя файла не повод падать.
         let now = std::time::SystemTime::now()
@@ -487,7 +551,11 @@ fn write_list_file(root_path: String, version_path: String, file_name: String, c
     let final_content = cleaned_lines.join("\n") + "\n";
     fs::write(target, final_content).map_err(|e| e.to_string())?;
 
-    Ok(format!("Сохранено. Удалено дубликатов: {}. В корзину отправлено строк: {}", removed_count, deleted_lines.len()))
+    Ok(format!(
+        "Сохранено. Удалено дубликатов: {}. В корзину отправлено строк: {}",
+        removed_count,
+        deleted_lines.len()
+    ))
 }
 
 // --- КОМАНДЫ КОРЗИНЫ ---
@@ -509,19 +577,30 @@ fn get_trash_files(root_path: String) -> Result<Vec<TrashItem>, String> {
             }
         }
     }
-    files.sort_by(|a, b| b.time.cmp(&a.time));
+    files.sort_by_key(|item| std::cmp::Reverse(item.time));
     Ok(files)
 }
 
 #[tauri::command]
-fn restore_trash_file(root_path: String, version_path: String, trash_id: String, original_name: String, deleted_lines: Vec<String>) -> Result<String, String> {
+fn restore_trash_file(
+    root_path: String,
+    version_path: String,
+    trash_id: String,
+    original_name: String,
+    deleted_lines: Vec<String>,
+) -> Result<String, String> {
     let trash_file = Path::new(&root_path).join("zapret_trash").join(&trash_id);
     let p1 = Path::new(&version_path).join("lists").join(&original_name);
-    let p2 = Path::new(&version_path).join("zapret-data").join("lists").join(&original_name);
+    let p2 = Path::new(&version_path)
+        .join("zapret-data")
+        .join("lists")
+        .join(&original_name);
     let target = if p1.exists() { p1 } else { p2 };
 
     if let Some(parent) = target.parent() {
-        if !parent.exists() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
     }
 
     let mut current_content = fs::read_to_string(&target).unwrap_or_default();
@@ -532,14 +611,18 @@ fn restore_trash_file(root_path: String, version_path: String, trash_id: String,
     let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in current_content.lines() {
         let s = line.trim();
-        if !s.is_empty() { existing.insert(s.to_lowercase()); }
+        if !s.is_empty() {
+            existing.insert(s.to_lowercase());
+        }
     }
 
     let mut restored = 0usize;
     let mut skipped = 0usize;
     for line in deleted_lines {
         let s = line.trim();
-        if s.is_empty() { continue; }
+        if s.is_empty() {
+            continue;
+        }
         if existing.insert(s.to_lowercase()) {
             current_content.push_str(s);
             current_content.push('\n');
@@ -551,7 +634,10 @@ fn restore_trash_file(root_path: String, version_path: String, trash_id: String,
 
     fs::write(&target, current_content).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(trash_file);
-    Ok(format!("Восстановлено строк: {}. Пропущено дубликатов: {}.", restored, skipped))
+    Ok(format!(
+        "Восстановлено строк: {}. Пропущено дубликатов: {}.",
+        restored, skipped
+    ))
 }
 
 #[tauri::command]
@@ -576,17 +662,32 @@ fn merge_folders(src: String, dst: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn sync_github(version_path: String, file_name: String, url: String) -> Result<String, String> {
+async fn sync_github(
+    version_path: String,
+    file_name: String,
+    url: String,
+) -> Result<String, String> {
     let res = reqwest::get(url).await.map_err(|e| e.to_string())?;
-    if !res.status().is_success() { return Err("Download failed".into()); }
+    if !res.status().is_success() {
+        return Err("Download failed".into());
+    }
     let downloaded_text = res.text().await.map_err(|e| e.to_string())?;
     let p1 = Path::new(&version_path).join("lists").join(&file_name);
-    let p2 = Path::new(&version_path).join("zapret-data").join("lists").join(&file_name);
+    let p2 = Path::new(&version_path)
+        .join("zapret-data")
+        .join("lists")
+        .join(&file_name);
     let target = if p1.exists() { p1 } else { p2 };
-    let existing_text = if target.exists() { fs::read_to_string(&target).unwrap_or_default() } else { String::new() };
+    let existing_text = if target.exists() {
+        fs::read_to_string(&target).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let merged = merge_text(&existing_text, &downloaded_text);
     if let Some(parent) = target.parent() {
-        if !parent.exists() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
     }
     fs::write(target, merged).map_err(|e| e.to_string())?;
     Ok(file_name)
@@ -615,10 +716,16 @@ fn validate_list(content: String, is_ip_list: bool) -> Result<Vec<String>, Strin
 
     for (index, line) in content.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
 
         if is_ip_list {
-            let ip_part = if line.contains('/') { line.split('/').next().unwrap_or("") } else { line };
+            let ip_part = if line.contains('/') {
+                line.split('/').next().unwrap_or("")
+            } else {
+                line
+            };
             if std::net::IpAddr::from_str(ip_part).is_err() {
                 errors.push(format!("Строка {}: '{}' — неверный IP", index + 1, line));
             }
@@ -643,7 +750,9 @@ fn smart_parse_domains(input: String) -> Result<(Vec<String>, Vec<String>, usize
 
     for token in tokens {
         let t = token.trim();
-        if t.is_empty() { continue; }
+        if t.is_empty() {
+            continue;
+        }
 
         let (prefix, body, suffix) = split_zapret_line(t);
         if body.is_empty() {
@@ -654,8 +763,14 @@ fn smart_parse_domains(input: String) -> Result<(Vec<String>, Vec<String>, usize
         let mut body_out = body;
         if !body_out.is_ascii() {
             match idna::domain_to_ascii(&body_out) {
-                Ok(puny) => { body_out = puny; converted += 1; }
-                Err(_) => { invalid.push(t.to_string()); continue; }
+                Ok(puny) => {
+                    body_out = puny;
+                    converted += 1;
+                }
+                Err(_) => {
+                    invalid.push(t.to_string());
+                    continue;
+                }
             }
         }
 
@@ -669,7 +784,10 @@ fn smart_parse_domains(input: String) -> Result<(Vec<String>, Vec<String>, usize
 }
 
 #[tauri::command]
-fn clean_and_validate(content: String, is_ip_list: bool) -> Result<(String, Vec<String>, usize), String> {
+fn clean_and_validate(
+    content: String,
+    is_ip_list: bool,
+) -> Result<(String, Vec<String>, usize), String> {
     let mut seen = std::collections::HashSet::new();
     let mut cleaned_lines = Vec::new();
     let mut removed_count = 0;
@@ -685,7 +803,10 @@ fn clean_and_validate(content: String, is_ip_list: bool) -> Result<(String, Vec<
             trimmed.to_string()
         } else {
             let (prefix, body, suffix) = split_zapret_line(trimmed);
-            if body.is_empty() { removed_count += 1; continue; }
+            if body.is_empty() {
+                removed_count += 1;
+                continue;
+            }
 
             let mut body_out = body;
             if !body_out.is_ascii() {
@@ -721,11 +842,15 @@ fn consolidate_subdomains(content: String) -> Result<(String, usize), String> {
 
     for raw in content.lines() {
         let line = raw.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         input_count += 1;
 
         if line.starts_with('#') {
-            if seen.insert(line.to_lowercase()) { out.push(line.to_string()); }
+            if seen.insert(line.to_lowercase()) {
+                out.push(line.to_string());
+            }
             continue;
         }
 
@@ -733,14 +858,18 @@ fn consolidate_subdomains(content: String) -> Result<(String, usize), String> {
         // '^' — строгий якорь: только этот домен, без поддоменов.
         // Сжатие ^dns.nextdns.io до ^nextdns.io сломало бы правило, поэтому не трогаем.
         if prefix.contains('^') {
-            if seen.insert(line.to_lowercase()) { out.push(line.to_string()); }
+            if seen.insert(line.to_lowercase()) {
+                out.push(line.to_string());
+            }
             continue;
         }
         let body_lower = body.trim().to_lowercase();
         let is_ip = body_lower.contains('/') || std::net::IpAddr::from_str(&body_lower).is_ok();
         // Не трогаем всё, что не похоже на обычный домен (wildcard, порт, мусор).
         let is_plain_domain = body_lower.contains('.')
-            && body_lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+            && body_lower
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
 
         let consolidated = if is_ip || !is_plain_domain {
             line.to_string()
@@ -757,7 +886,11 @@ fn consolidate_subdomains(content: String) -> Result<(String, usize), String> {
     }
 
     let removed = input_count.saturating_sub(out.len());
-    let text = if out.is_empty() { String::new() } else { out.join("\n") + "\n" };
+    let text = if out.is_empty() {
+        String::new()
+    } else {
+        out.join("\n") + "\n"
+    };
     Ok((text, removed))
 }
 
@@ -781,18 +914,34 @@ async fn check_dead_domains(content: String) -> Result<DeadDomainReport, String>
 
     for raw in content.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let (_, body, _) = split_zapret_line(line);
         let body = body.trim().trim_end_matches('.').to_lowercase();
-        if body.is_empty() || !body.contains('.') { continue; }
-        if body.contains('/') || std::net::IpAddr::from_str(&body).is_ok() { continue; }
-        if !body.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') { continue; }
-        if seen.insert(body.clone()) { targets.push(body); }
+        if body.is_empty() || !body.contains('.') {
+            continue;
+        }
+        if body.contains('/') || std::net::IpAddr::from_str(&body).is_ok() {
+            continue;
+        }
+        if !body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            continue;
+        }
+        if seen.insert(body.clone()) {
+            targets.push(body);
+        }
     }
 
     let checked = targets.len();
     if checked == 0 {
-        return Ok(DeadDomainReport { checked, dead: Vec::new() });
+        return Ok(DeadDomainReport {
+            checked,
+            dead: Vec::new(),
+        });
     }
 
     let client = reqwest::Client::builder()
@@ -843,7 +992,9 @@ async fn check_zapret_version(version_path: String) -> Result<(String, String), 
                 // Шаблон — константа, компилируется всегда.
                 .expect("regex версии должен компилироваться")
         });
-        if let Some(caps) = re.captures(&content) { local_version = caps[1].to_string(); }
+        if let Some(caps) = re.captures(&content) {
+            local_version = caps[1].to_string();
+        }
     }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -854,13 +1005,24 @@ async fn check_zapret_version(version_path: String) -> Result<(String, String), 
         .send()
         .await
         .map_err(|e| format!("Сервер не отвечает: {e}"))?;
-    if !res.status().is_success() { return Err("Не удалось проверить версию на GitHub".into()); }
-    let remote_version = res.text().await.map_err(|e| e.to_string())?.trim().to_string();
+    if !res.status().is_success() {
+        return Err("Не удалось проверить версию на GitHub".into());
+    }
+    let remote_version = res
+        .text()
+        .await
+        .map_err(|e| e.to_string())?
+        .trim()
+        .to_string();
     Ok((local_version, remote_version))
 }
 
 #[tauri::command]
-async fn download_zapret(root_path: String, active_name: String, new_version: String) -> Result<String, String> {
+async fn download_zapret(
+    root_path: String,
+    active_name: String,
+    new_version: String,
+) -> Result<String, String> {
     let root = Path::new(&root_path);
     let old_dir = root.join(&active_name);
     let new_dir_name = format!("zapret-discord-youtube-{}", new_version);
@@ -873,12 +1035,18 @@ async fn download_zapret(root_path: String, active_name: String, new_version: St
     let bytes = res.bytes().await.map_err(|e| e.to_string())?;
     fs::write(&zip_path, bytes).map_err(|e| e.to_string())?;
 
-    if extract_dir.exists() { let _ = fs::remove_dir_all(&extract_dir); }
+    if extract_dir.exists() {
+        let _ = fs::remove_dir_all(&extract_dir);
+    }
     fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
-    let ps_cmd = format!("Expand-Archive -Path '{}' -DestinationPath '{}' -Force", zip_path.to_string_lossy(), extract_dir.to_string_lossy());
+    let ps_cmd = format!(
+        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+        zip_path.to_string_lossy(),
+        extract_dir.to_string_lossy()
+    );
     let mut extract = Command::new("powershell");
     hide_console(&mut extract);
-    let status = extract.args(&["-NoProfile", "-Command", &ps_cmd]).status();
+    let status = extract.args(["-NoProfile", "-Command", &ps_cmd]).status();
     match status {
         Ok(status) if status.success() => {}
         Ok(status) => {
@@ -907,17 +1075,23 @@ async fn download_zapret(root_path: String, active_name: String, new_version: St
 
     let old_lists = old_dir.join("lists");
     let new_lists = new_dir.join("lists");
-    if old_lists.exists() { let _ = merge_dirs(&old_lists, &new_lists); }
+    if old_lists.exists() {
+        let _ = merge_dirs(&old_lists, &new_lists);
+    }
     let old_utils = old_dir.join("utils");
     let new_utils = new_dir.join("utils");
-    if old_utils.exists() { let _ = merge_dirs(&old_utils, &new_utils); }
+    if old_utils.exists() {
+        let _ = merge_dirs(&old_utils, &new_utils);
+    }
     Ok(new_dir_name)
 }
 
 #[tauri::command]
 fn delete_version(version_path: String) -> Result<(), String> {
     let path = Path::new(&version_path);
-    if path.exists() { fs::remove_dir_all(path).map_err(|e| e.to_string())?; }
+    if path.exists() {
+        fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -997,7 +1171,9 @@ fn parse_port(value: &str, context: &str) -> Result<u16, String> {
 /// Возвращает (включён, режим, tcp, udp). Файла нет — фильтр выключен,
 /// а в UI подставляются значения по умолчанию.
 fn read_game_filter_config(version_path: &str) -> (bool, String, String, String) {
-    let flag_file = Path::new(version_path).join("utils").join("game_filter.enabled");
+    let flag_file = Path::new(version_path)
+        .join("utils")
+        .join("game_filter.enabled");
     let (default_mode, default_tcp, default_udp) = game_filter_defaults();
 
     let Ok(content) = fs::read_to_string(&flag_file) else {
@@ -1009,7 +1185,9 @@ fn read_game_filter_config(version_path: &str) -> (bool, String, String, String)
     let mut udp = default_udp;
 
     for line in content.lines() {
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let value = value.trim();
         if value.is_empty() {
             continue;
@@ -1206,7 +1384,9 @@ fn list_strategies(version_path: String) -> Result<Vec<String>, String> {
     if let Ok(entries) = fs::read_dir(version_path) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".bat") && !name.starts_with("service") { bats.push(name); }
+            if name.ends_with(".bat") && !name.starts_with("service") {
+                bats.push(name);
+            }
         }
     }
     bats.sort();
@@ -1219,7 +1399,11 @@ fn install_strategy(version_path: String, strategy_name: String) -> Result<(), S
     let index = bats.iter().position(|r| r == &strategy_name).map(|i| i + 1);
     if let Some(idx) = index {
         let bat_path = Path::new(&version_path).join("service.bat");
-        let ps_cmd = format!("Start-Process cmd -ArgumentList '/c echo {} ^| \"\"{}\"\" admin' -Verb RunAs", idx, bat_path.to_string_lossy());
+        let ps_cmd = format!(
+            "Start-Process cmd -ArgumentList '/c echo {} ^| \"\"{}\"\" admin' -Verb RunAs",
+            idx,
+            bat_path.to_string_lossy()
+        );
         let mut command = Command::new("powershell");
         hide_console(&mut command);
         command
@@ -1227,7 +1411,9 @@ fn install_strategy(version_path: String, strategy_name: String) -> Result<(), S
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
-    } else { Err("Стратегия не найдена".into()) }
+    } else {
+        Err("Стратегия не найдена".into())
+    }
 }
 
 // --- СВИТЧЕР РАСКЛАДКИ ---
@@ -1284,7 +1470,11 @@ fn dictionaries_ready() -> bool {
 }
 
 #[tauri::command]
-fn update_switcher_config(state: tauri::State<Arc<Mutex<SwitcherState>>>, enabled: bool, exclusions: Vec<String>) {
+fn update_switcher_config(
+    state: tauri::State<Arc<Mutex<SwitcherState>>>,
+    enabled: bool,
+    exclusions: Vec<String>,
+) {
     let mut s = lock_switcher(&state);
     s.enabled = enabled;
     s.exclusions = exclusions;
@@ -1788,8 +1978,8 @@ fn run_switcher_listener(shared: Arc<Mutex<SwitcherState>>, app: tauri::AppHandl
                     // отменяет правку. Предлагаем запомнить слово.
                     if !repeat {
                         let now = now_ms();
-                        let double = last_backspace_ms != 0
-                            && now.saturating_sub(last_backspace_ms) <= 600;
+                        let double =
+                            last_backspace_ms != 0 && now.saturating_sub(last_backspace_ms) <= 600;
                         if double {
                             last_backspace_ms = 0;
                             suggest_word_exclusion(&app_cb);
@@ -1817,8 +2007,13 @@ fn run_switcher_listener(shared: Arc<Mutex<SwitcherState>>, app: tauri::AppHandl
                     if !word.is_empty() {
                         let typed = std::mem::take(&mut word);
                         let typed_russian = word_russian;
-                        let corrected =
-                            handle_finished_word(&typed, typed_russian, &shared_cb, &suppress_cb, &app_cb);
+                        let corrected = handle_finished_word(
+                            &typed,
+                            typed_russian,
+                            &shared_cb,
+                            &suppress_cb,
+                            &app_cb,
+                        );
                         let final_text = corrected.clone().unwrap_or(typed);
                         last_word = Some(final_text);
                         last_word_russian = if corrected.is_some() {
@@ -1904,7 +2099,8 @@ fn run_switcher_listener(shared: Arc<Mutex<SwitcherState>>, app: tauri::AppHandl
         switcher_log(format!("не удалось запустить rdev::listen: {err:?}"));
         let _ = app.emit(
             "switcher-error",
-            "Не удалось запустить глобальный перехват клавиатуры. Свитчер не будет работать.".to_string(),
+            "Не удалось запустить глобальный перехват клавиатуры. Свитчер не будет работать."
+                .to_string(),
         );
     }
 }
@@ -2052,7 +2248,8 @@ fn custom_word_suggestion(
     };
 
     // Обычное слово исходного языка пользователь мог перевести намеренно.
-    if source_base.contains(&original_norm) || list_contains_normalized(source_custom, &original_norm)
+    if source_base.contains(&original_norm)
+        || list_contains_normalized(source_custom, &original_norm)
     {
         return None;
     }
@@ -2100,6 +2297,7 @@ fn is_double_shift(
 }
 
 /// Double Shift: конвертирует последнее набранное слово в другую раскладку.
+#[allow(clippy::too_many_arguments)] // состояние хука передаётся целиком, разбиение ухудшит читаемость
 fn trigger_double_shift(
     word: &mut String,
     word_russian: bool,
@@ -2127,14 +2325,15 @@ fn trigger_double_shift(
     let (text, source_russian, has_space) = if !word.is_empty() {
         (std::mem::take(word), word_russian, false)
     } else if let Some(text) = last_word.as_ref() {
-        (text.clone(), *last_word_russian, *last_word_followed_by_space)
+        (
+            text.clone(),
+            *last_word_russian,
+            *last_word_followed_by_space,
+        )
     } else {
         // Буфера нет (например, после Enter) — пробуем преобразовать выделение.
         // В терминалах Ctrl+C без выделения прерывает команду, поэтому туда не лезем.
-        if active_process
-            .as_deref()
-            .is_some_and(is_terminal_process)
-        {
+        if active_process.as_deref().is_some_and(is_terminal_process) {
             switcher_log("selection: терминал пропущен, Ctrl+C может прервать команду");
             return;
         }
@@ -2155,10 +2354,13 @@ fn trigger_double_shift(
 
     // Если переведённого слова нет в словарях, предложим запомнить пару.
     // Отклонённые слова сюда уже не попадут (проверка внутри helper'а).
-    let suggestion = DICTIONARIES.get().and_then(|d| d.as_ref()).and_then(|dicts| {
-        let s = lock_switcher(shared);
-        custom_word_suggestion(&text, &converted, source_russian, dicts, &s)
-    });
+    let suggestion = DICTIONARIES
+        .get()
+        .and_then(|d| d.as_ref())
+        .and_then(|dicts| {
+            let s = lock_switcher(shared);
+            custom_word_suggestion(&text, &converted, source_russian, dicts, &s)
+        });
 
     let paste_text = if has_space {
         format!("{converted} ")
@@ -2312,7 +2514,10 @@ fn normalize_for_lookup(word: &str) -> String {
 }
 
 fn is_cyrillic_word(word: &str) -> bool {
-    !word.is_empty() && word.chars().all(|c| matches!(c, 'а'..='я' | 'ё' | 'А'..='Я' | 'Ё'))
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| matches!(c, 'а'..='я' | 'ё' | 'А'..='Я' | 'Ё'))
 }
 
 /// Знаки, которые в английской раскладке могут оказаться частью слова:
@@ -2321,8 +2526,8 @@ fn is_cyrillic_word(word: &str) -> bool {
 /// Пока такой символ не встретился, буфер слова не очищается, поэтому
 /// `.,rf` и `ghbdtn&` доживают до автозамены или Double Shift.
 const LATIN_KEYBOARD_PUNCTUATION: [char; 27] = [
-    '[', ']', ';', '\'', ',', '.', '`', '/', '&', '?', '@', '#', '$', '^', '*', '(', ')',
-    '_', '+', '{', '}', '|', '<', '>', '~', ':', '"',
+    '[', ']', ';', '\'', ',', '.', '`', '/', '&', '?', '@', '#', '$', '^', '*', '(', ')', '_', '+',
+    '{', '}', '|', '<', '>', '~', ':', '"',
 ];
 
 fn is_latin_word(word: &str) -> bool {
@@ -2387,9 +2592,13 @@ fn detect_layout_mistake(
 /// Перевод слова по позициям клавиш: `ghbdtn` -> `привет` и обратно.
 fn convert_layout(word: &str, to_russian: bool) -> String {
     if to_russian {
-        word.chars().map(|c| en_char_to_ru(c).unwrap_or(c)).collect()
+        word.chars()
+            .map(|c| en_char_to_ru(c).unwrap_or(c))
+            .collect()
     } else {
-        word.chars().map(|c| ru_char_to_en(c).unwrap_or(c)).collect()
+        word.chars()
+            .map(|c| ru_char_to_en(c).unwrap_or(c))
+            .collect()
     }
 }
 
@@ -2397,12 +2606,39 @@ fn en_char_to_ru(c: char) -> Option<char> {
     // Буквы и знаки, которые не меняются от Shift: регистр сохраняем.
     let lower = c.to_ascii_lowercase();
     let letter = match lower {
-        'q' => 'й', 'w' => 'ц', 'e' => 'у', 'r' => 'к', 't' => 'е', 'y' => 'н',
-        'u' => 'г', 'i' => 'ш', 'o' => 'щ', 'p' => 'з', '[' => 'х', ']' => 'ъ',
-        'a' => 'ф', 's' => 'ы', 'd' => 'в', 'f' => 'а', 'g' => 'п', 'h' => 'р',
-        'j' => 'о', 'k' => 'л', 'l' => 'д', ';' => 'ж', '\'' => 'э',
-        'z' => 'я', 'x' => 'ч', 'c' => 'с', 'v' => 'м', 'b' => 'и', 'n' => 'т',
-        'm' => 'ь', ',' => 'б', '.' => 'ю', '`' => 'ё',
+        'q' => 'й',
+        'w' => 'ц',
+        'e' => 'у',
+        'r' => 'к',
+        't' => 'е',
+        'y' => 'н',
+        'u' => 'г',
+        'i' => 'ш',
+        'o' => 'щ',
+        'p' => 'з',
+        '[' => 'х',
+        ']' => 'ъ',
+        'a' => 'ф',
+        's' => 'ы',
+        'd' => 'в',
+        'f' => 'а',
+        'g' => 'п',
+        'h' => 'р',
+        'j' => 'о',
+        'k' => 'л',
+        'l' => 'д',
+        ';' => 'ж',
+        '\'' => 'э',
+        'z' => 'я',
+        'x' => 'ч',
+        'c' => 'с',
+        'v' => 'м',
+        'b' => 'и',
+        'n' => 'т',
+        'm' => 'ь',
+        ',' => 'б',
+        '.' => 'ю',
+        '`' => 'ё',
         _ => ' ',
     };
     if letter != ' ' {
@@ -2415,10 +2651,21 @@ fn en_char_to_ru(c: char) -> Option<char> {
 
     // Shift-варианты тех же клавиш: в ЙЦУКЕН они дают другие буквы или знаки.
     let mapped = match c {
-        '{' => 'Х', '}' => 'Ъ', ':' => 'Ж', '"' => 'Э',
-        '<' => 'Б', '>' => 'Ю', '~' => 'Ё',
-        '@' => '"', '#' => '№', '$' => ';', '^' => ':', '&' => '?',
-        '/' => '.', '?' => ',', '|' => '/',
+        '{' => 'Х',
+        '}' => 'Ъ',
+        ':' => 'Ж',
+        '"' => 'Э',
+        '<' => 'Б',
+        '>' => 'Ю',
+        '~' => 'Ё',
+        '@' => '"',
+        '#' => '№',
+        '$' => ';',
+        '^' => ':',
+        '&' => '?',
+        '/' => '.',
+        '?' => ',',
+        '|' => '/',
         _ => return None,
     };
     Some(mapped)
@@ -2427,20 +2674,52 @@ fn en_char_to_ru(c: char) -> Option<char> {
 fn ru_char_to_en(c: char) -> Option<char> {
     let lower = c.to_lowercase().next().unwrap_or(c);
     let letter = match lower {
-        'й' => 'q', 'ц' => 'w', 'у' => 'e', 'к' => 'r', 'е' => 't', 'н' => 'y',
-        'г' => 'u', 'ш' => 'i', 'щ' => 'o', 'з' => 'p', 'х' => '[', 'ъ' => ']',
-        'ф' => 'a', 'ы' => 's', 'в' => 'd', 'а' => 'f', 'п' => 'g', 'р' => 'h',
-        'о' => 'j', 'л' => 'k', 'д' => 'l', 'ж' => ';', 'э' => '\'',
-        'я' => 'z', 'ч' => 'x', 'с' => 'c', 'м' => 'v', 'и' => 'b', 'т' => 'n',
-        'ь' => 'm', 'б' => ',', 'ю' => '.', 'ё' => '`',
+        'й' => 'q',
+        'ц' => 'w',
+        'у' => 'e',
+        'к' => 'r',
+        'е' => 't',
+        'н' => 'y',
+        'г' => 'u',
+        'ш' => 'i',
+        'щ' => 'o',
+        'з' => 'p',
+        'х' => '[',
+        'ъ' => ']',
+        'ф' => 'a',
+        'ы' => 's',
+        'в' => 'd',
+        'а' => 'f',
+        'п' => 'g',
+        'р' => 'h',
+        'о' => 'j',
+        'л' => 'k',
+        'д' => 'l',
+        'ж' => ';',
+        'э' => '\'',
+        'я' => 'z',
+        'ч' => 'x',
+        'с' => 'c',
+        'м' => 'v',
+        'и' => 'b',
+        'т' => 'n',
+        'ь' => 'm',
+        'б' => ',',
+        'ю' => '.',
+        'ё' => '`',
         _ => ' ',
     };
     if letter != ' ' {
         if c.is_uppercase() {
             // Shift для этих букв даёт знак, а не заглавную: Х → `{`, Б → `<`.
             return Some(match lower {
-                'х' => '{', 'ъ' => '}', 'ж' => ':', 'э' => '"',
-                'б' => '<', 'ю' => '>', 'ё' => '~',
+                'х' => '{',
+                'ъ' => '}',
+                'ж' => ':',
+                'э' => '"',
+                'б' => '<',
+                'ю' => '>',
+                'ё' => '~',
                 _ => letter.to_ascii_uppercase(),
             });
         }
@@ -2449,8 +2728,14 @@ fn ru_char_to_en(c: char) -> Option<char> {
 
     // Знаки, которые в ЙЦУКЕН стоят на Shift-клавишах.
     let mapped = match c {
-        '№' => '#', ';' => '$', ':' => '^', '?' => '&', '"' => '@',
-        '/' => '|', '.' => '/', ',' => '?',
+        '№' => '#',
+        ';' => '$',
+        ':' => '^',
+        '?' => '&',
+        '"' => '@',
+        '/' => '|',
+        '.' => '/',
+        ',' => '?',
         _ => return None,
     };
     Some(mapped)
@@ -2463,15 +2748,32 @@ fn key_to_char(key: rdev::Key, shift: bool, caps_lock: bool, russian: bool) -> O
 
     // Буквы: физическая клавиша -> строчная латинская.
     let letter = match key {
-        Key::KeyQ => Some('q'), Key::KeyW => Some('w'), Key::KeyE => Some('e'),
-        Key::KeyR => Some('r'), Key::KeyT => Some('t'), Key::KeyY => Some('y'),
-        Key::KeyU => Some('u'), Key::KeyI => Some('i'), Key::KeyO => Some('o'),
-        Key::KeyP => Some('p'), Key::KeyA => Some('a'), Key::KeyS => Some('s'),
-        Key::KeyD => Some('d'), Key::KeyF => Some('f'), Key::KeyG => Some('g'),
-        Key::KeyH => Some('h'), Key::KeyJ => Some('j'), Key::KeyK => Some('k'),
-        Key::KeyL => Some('l'), Key::KeyZ => Some('z'), Key::KeyX => Some('x'),
-        Key::KeyC => Some('c'), Key::KeyV => Some('v'), Key::KeyB => Some('b'),
-        Key::KeyN => Some('n'), Key::KeyM => Some('m'),
+        Key::KeyQ => Some('q'),
+        Key::KeyW => Some('w'),
+        Key::KeyE => Some('e'),
+        Key::KeyR => Some('r'),
+        Key::KeyT => Some('t'),
+        Key::KeyY => Some('y'),
+        Key::KeyU => Some('u'),
+        Key::KeyI => Some('i'),
+        Key::KeyO => Some('o'),
+        Key::KeyP => Some('p'),
+        Key::KeyA => Some('a'),
+        Key::KeyS => Some('s'),
+        Key::KeyD => Some('d'),
+        Key::KeyF => Some('f'),
+        Key::KeyG => Some('g'),
+        Key::KeyH => Some('h'),
+        Key::KeyJ => Some('j'),
+        Key::KeyK => Some('k'),
+        Key::KeyL => Some('l'),
+        Key::KeyZ => Some('z'),
+        Key::KeyX => Some('x'),
+        Key::KeyC => Some('c'),
+        Key::KeyV => Some('v'),
+        Key::KeyB => Some('b'),
+        Key::KeyN => Some('n'),
+        Key::KeyM => Some('m'),
         _ => None,
     };
 
@@ -2626,7 +2928,11 @@ fn ensure_keyboard_layout(to_russian: bool) {
         return;
     }
 
-    let layout_id = if to_russian { w!("00000419") } else { w!("00000409") };
+    let layout_id = if to_russian {
+        w!("00000419")
+    } else {
+        w!("00000409")
+    };
     // SAFETY: `layout_id` — статическая строка нужной длины; HKL принадлежит
     // системе (освобождать его нельзя), PostMessageW не блокирует поток.
     unsafe {
@@ -2755,7 +3061,10 @@ fn restore_clipboard(saved: SavedClipboard) {
         std::thread::sleep(Duration::from_millis(250));
         // Пока шла задержка, буфер мог занять более новый поток правки:
         // возврат старого текста испортил бы его вставку.
-        if !restore_is_current(saved.generation, CLIPBOARD_GENERATION.load(Ordering::SeqCst)) {
+        if !restore_is_current(
+            saved.generation,
+            CLIPBOARD_GENERATION.load(Ordering::SeqCst),
+        ) {
             return;
         }
         match restore_action(&saved.previous) {
@@ -2821,12 +3130,7 @@ fn key_is_held(vk: i32) -> bool {
 ///
 /// Модификатор, который уже зажат физически, не пережимается и не отпускается.
 #[cfg(windows)]
-fn send_hotkey(
-    enigo: &mut enigo::Enigo,
-    modifier: HotkeyModifier,
-    vk: u32,
-    label: &str,
-) -> bool {
+fn send_hotkey(enigo: &mut enigo::Enigo, modifier: HotkeyModifier, vk: u32, label: &str) -> bool {
     use enigo::{Direction, Key, Keyboard};
 
     // Alt и Win с Insert дают посторонние команды (Alt+Insert, Win+Insert).
@@ -2990,7 +3294,12 @@ fn convert_selection_blocking() -> bool {
     // поэтому при зажатом Shift запасной путь не пробуем.
     if copied.is_none() && !key_is_held(VK_SHIFT_KEY) {
         switcher_log("copy: Ctrl+Insert ничего не скопировал, пробуем Ctrl+C");
-        if send_hotkey(&mut enigo, HotkeyModifier::Control, VK_COPY_FALLBACK, "copy") {
+        if send_hotkey(
+            &mut enigo,
+            HotkeyModifier::Control,
+            VK_COPY_FALLBACK,
+            "copy",
+        ) {
             copied = read_clipboard_text();
         }
     }
@@ -3047,7 +3356,11 @@ fn convert_selected_text(suppress_until: &Arc<AtomicU64>) {
             switcher_log("selection: выделение не преобразовано");
         }
         // Не оставляем подавление «висеть»: пользователь может печатать сразу.
-        end_suppression(&suppress_worker, my_suppress, if converted { 150 } else { 0 });
+        end_suppression(
+            &suppress_worker,
+            my_suppress,
+            if converted { 150 } else { 0 },
+        );
     });
 }
 
@@ -3108,10 +3421,14 @@ fn replace_word(
 }
 
 #[cfg(not(windows))]
-fn replace_word(_char_count: usize, _text: &str, _delete_trailing_space: bool, _to_russian: bool) -> bool {
+fn replace_word(
+    _char_count: usize,
+    _text: &str,
+    _delete_trailing_space: bool,
+    _to_russian: bool,
+) -> bool {
     false
 }
-
 
 fn parse_english_dictionary(content: &str) -> HashSet<String> {
     content
@@ -3282,7 +3599,11 @@ async fn update_hosts(entries: Vec<String>) -> Result<(), String> {
         .lines()
         .map(|line| line.trim_end().to_string())
         .collect();
-    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+    while lines
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
         lines.pop();
     }
 
@@ -3325,9 +3646,9 @@ ipconfig /flushdns | Out-Null\r\n",
     match tokio::time::timeout(HOSTS_TIMEOUT, task).await {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => Err(
-            "PowerShell не ответил за 30 секунд. Проверьте запрос UAC и повторите.".to_string(),
-        ),
+        Err(_) => {
+            Err("PowerShell не ответил за 30 секунд. Проверьте запрос UAC и повторите.".to_string())
+        }
     }
 }
 
@@ -3352,10 +3673,18 @@ fn sanitize_auto_hosts(downloaded: &str) -> Vec<String> {
         })
         .collect();
 
-    while lines.first().map(|line| line.trim().is_empty()).unwrap_or(false) {
+    while lines
+        .first()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
         lines.remove(0);
     }
-    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+    while lines
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
         lines.pop();
     }
     lines
@@ -3392,7 +3721,11 @@ fn apply_auto_hosts_block(current: &str, downloaded: &str) -> String {
         result.extend(lines[rest..].iter().cloned());
     } else {
         result.extend(lines);
-        while result.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        while result
+            .last()
+            .map(|line| line.trim().is_empty())
+            .unwrap_or(false)
+        {
             result.pop();
         }
         if !result.is_empty() {
@@ -3401,7 +3734,11 @@ fn apply_auto_hosts_block(current: &str, downloaded: &str) -> String {
         result.extend(block);
     }
 
-    while result.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+    while result
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
         result.pop();
     }
     let mut text = result.join("\r\n");
@@ -3474,9 +3811,9 @@ ipconfig /flushdns | Out-Null\r\n",
         Ok(Ok(Ok(()))) => Ok(format!("Hosts обновлён: {added} записей")),
         Ok(Ok(Err(err))) => Err(err),
         Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => Err(
-            "PowerShell не ответил за 30 секунд. Проверьте запрос UAC и повторите.".to_string(),
-        ),
+        Err(_) => {
+            Err("PowerShell не ответил за 30 секунд. Проверьте запрос UAC и повторите.".to_string())
+        }
     }
 }
 
@@ -3503,7 +3840,7 @@ fn zapret_tests_paths() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> 
 
 fn read_text_lossy(path: &Path) -> String {
     fs::read(path)
-        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .map(|bytes| crate::win_cmd::decode_console_output(&bytes))
         .unwrap_or_default()
 }
 
@@ -3644,10 +3981,7 @@ async fn run_zapret_tests(version_path: String) -> Result<String, String> {
         .join("utils")
         .join("test zapret.ps1");
     if !script.is_file() {
-        return Err(format!(
-            "Не найден скрипт тестов: {}",
-            script.display()
-        ));
+        return Err(format!("Не найден скрипт тестов: {}", script.display()));
     }
 
     // Скрипт взаимодействует с ipset и запускает стратегии, поэтому даём
@@ -3656,9 +3990,9 @@ async fn run_zapret_tests(version_path: String) -> Result<String, String> {
     match tokio::time::timeout(Duration::from_secs(30 * 60), task).await {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => Err(
-            "Тесты не завершились за 30 минут. Проверьте окно UAC и повторите.".to_string(),
-        ),
+        Err(_) => {
+            Err("Тесты не завершились за 30 минут. Проверьте окно UAC и повторите.".to_string())
+        }
     }
 }
 
@@ -3774,9 +4108,8 @@ fn bat_variables(
 
 fn expand_bat_variables(text: &str, vars: &HashMap<String, String>) -> String {
     static VAR_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = VAR_RE.get_or_init(|| {
-        regex::Regex::new(r"%([A-Za-z_][A-Za-z0-9_]*)%").expect("variable regex")
-    });
+    let re = VAR_RE
+        .get_or_init(|| regex::Regex::new(r"%([A-Za-z_][A-Za-z0-9_]*)%").expect("variable regex"));
     re.replace_all(text, |caps: &regex::Captures| {
         let key = caps[1].to_ascii_lowercase();
         vars.get(&key)
@@ -4095,7 +4428,11 @@ fn extract_blockcheck_strategies(log: &str) -> Vec<String> {
     strategies
 }
 
-fn run_blockcheck_process(dir: &Path, cmd_name: &str, domains: &[String]) -> Result<String, String> {
+fn run_blockcheck_process(
+    dir: &Path,
+    cmd_name: &str,
+    domains: &[String],
+) -> Result<String, String> {
     // Одна строка для cmd: иначе кавычки вокруг имени файла ломаются при
     // передаче через CreateProcess.
     let mut line = format!("chcp 65001 >nul & \"{cmd_name}\"");
@@ -4207,7 +4544,11 @@ async fn run_blockcheck(
 }
 
 #[tauri::command]
-fn save_blockcheck_strategy(version_path: String, name: String, command: String) -> Result<String, String> {
+fn save_blockcheck_strategy(
+    version_path: String,
+    name: String,
+    command: String,
+) -> Result<String, String> {
     if !command.to_lowercase().contains("winws") {
         return Err("Команда не содержит winws.exe".into());
     }
@@ -4325,7 +4666,7 @@ async fn find_tool_processes(version_path: String) -> Vec<RunningTool> {
                 name,
             });
         }
-        result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        result.sort_by_key(|item| item.name.to_lowercase());
         result
     })
     .await
@@ -4335,9 +4676,13 @@ async fn find_tool_processes(version_path: String) -> Vec<RunningTool> {
 fn exclusion_matches(active: &str, exclusion: &str) -> bool {
     let active = active.trim().to_lowercase();
     let mut ex = exclusion.trim().trim_matches('"').trim().to_lowercase();
-    if ex.is_empty() { return false; }
+    if ex.is_empty() {
+        return false;
+    }
     // Разрешаем указывать процесс без расширения: «cs2» == «cs2.exe».
-    if !ex.contains('.') { ex.push_str(".exe"); }
+    if !ex.contains('.') {
+        ex.push_str(".exe");
+    }
     active == ex
 }
 
@@ -4347,7 +4692,8 @@ fn get_active_process_name() -> Option<String> {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, FALSE};
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -4355,11 +4701,15 @@ fn get_active_process_name() -> Option<String> {
     // и закрывается ниже; буфер для имени — на стеке, его размер передаётся API.
     unsafe {
         let hwnd = GetForegroundWindow();
-        if hwnd.is_invalid() { return None; }
+        if hwnd.is_invalid() {
+            return None;
+        }
 
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 { return None; }
+        if pid == 0 {
+            return None;
+        }
 
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid).ok()?;
         let mut buffer = [0u16; 1024];
@@ -4376,7 +4726,11 @@ fn get_active_process_name() -> Option<String> {
         let full_path = String::from_utf16_lossy(&buffer[..(size as usize).min(buffer.len())]);
         let full_path = full_path.trim_end_matches('\0');
         let name = full_path.rsplit(['\\', '/']).next().unwrap_or(full_path);
-        if name.is_empty() { None } else { Some(name.to_string()) }
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
     }
 }
 
@@ -4582,14 +4936,30 @@ mod game_filter_tests {
     #[test]
     fn accepts_valid_port_ranges() {
         for value in ["1024-65535", "443", "80,443,1000-2000", " 1024 - 65535 "] {
-            assert!(validate_port_range(value).is_ok(), "должен принять «{value}»");
+            assert!(
+                validate_port_range(value).is_ok(),
+                "должен принять «{value}»"
+            );
         }
     }
 
     #[test]
     fn rejects_invalid_port_ranges() {
-        for value in ["", "  ", "abc", "0", "65536", "2000-1000", "80,", "-", "80-"] {
-            assert!(validate_port_range(value).is_err(), "должен отклонить «{value}»");
+        for value in [
+            "",
+            "  ",
+            "abc",
+            "0",
+            "65536",
+            "2000-1000",
+            "80,",
+            "-",
+            "80-",
+        ] {
+            assert!(
+                validate_port_range(value).is_err(),
+                "должен отклонить «{value}»"
+            );
         }
     }
 
@@ -4654,14 +5024,8 @@ mod game_filter_tests {
     fn rejects_unknown_mode() {
         let dir = temp_version_dir("mode");
         let path = dir.to_string_lossy().to_string();
-        let err = toggle_game_filter(
-            path,
-            true,
-            Some("icmp".to_string()),
-            None,
-            None,
-        )
-        .expect_err("icmp не поддерживается service.bat");
+        let err = toggle_game_filter(path, true, Some("icmp".to_string()), None, None)
+            .expect_err("icmp не поддерживается service.bat");
         assert!(err.contains("icmp"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -4715,7 +5079,10 @@ mod service_flags_tests {
         fs::write(&list_file, REAL_LIST).unwrap();
 
         set_ipset_state(path.clone(), "none".into()).expect("none");
-        assert_eq!(fs::read_to_string(&list_file).unwrap(), "203.0.113.113/32\n");
+        assert_eq!(
+            fs::read_to_string(&list_file).unwrap(),
+            "203.0.113.113/32\n"
+        );
         assert_eq!(fs::read_to_string(&backup_file).unwrap(), REAL_LIST);
 
         // Переход none → any не должен затереть бэкап пустым файлом.
@@ -4787,8 +5154,10 @@ mod service_flags_tests {
         assert!(old.auto_check_updates);
 
         // Явное false переживает сериализацию.
-        let mut config = Config::default();
-        config.auto_check_updates = false;
+        let config = Config {
+            auto_check_updates: false,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert!(!parsed.auto_check_updates);
@@ -4863,8 +5232,14 @@ mod switcher_tests {
             assert_eq!(convert_layout(ru, false), en, "RU->EN: {ru}");
         }
         // Повторный Double Shift возвращает исходный текст.
-        assert_eq!(convert_layout(&convert_layout("ghbdtn&", true), false), "ghbdtn&");
-        assert_eq!(convert_layout(&convert_layout("ghbdtn/", true), false), "ghbdtn/");
+        assert_eq!(
+            convert_layout(&convert_layout("ghbdtn&", true), false),
+            "ghbdtn&"
+        );
+        assert_eq!(
+            convert_layout(&convert_layout("ghbdtn/", true), false),
+            "ghbdtn/"
+        );
     }
 
     #[test]
@@ -4897,7 +5272,8 @@ mod switcher_tests {
 
     #[test]
     fn parses_russian_dictionary_with_frequencies() {
-        let words = parse_russian_dictionary("и 999999\r\nпривет 123\r\nёлка 10\r\nnot-latin 1\r\n");
+        let words =
+            parse_russian_dictionary("и 999999\r\nпривет 123\r\nёлка 10\r\nnot-latin 1\r\n");
         assert!(words.contains("и"));
         assert!(words.contains("привет"));
         // «ё» нормализуется в «е» для проверки.
@@ -4909,8 +5285,16 @@ mod switcher_tests {
     fn embedded_dictionaries_load() {
         // include_str!-словари должны реально парситься, а не быть пустыми.
         let dicts = load_dictionaries().expect("embedded dictionaries");
-        assert!(dicts.english.len() > 5_000, "english: {}", dicts.english.len());
-        assert!(dicts.russian.len() > 50_000, "russian: {}", dicts.russian.len());
+        assert!(
+            dicts.english.len() > 5_000,
+            "english: {}",
+            dicts.english.len()
+        );
+        assert!(
+            dicts.russian.len() > 50_000,
+            "russian: {}",
+            dicts.russian.len()
+        );
     }
 
     #[test]
@@ -5062,9 +5446,7 @@ mod blockcheck_parser_tests {
 
     #[test]
     fn joins_caret_continuation() {
-        let lines = logical_bat_lines(
-            "@echo off\r\nstart \"x\" winws.exe --a ^\r\n--b=1\r\n",
-        );
+        let lines = logical_bat_lines("@echo off\r\nstart \"x\" winws.exe --a ^\r\n--b=1\r\n");
         assert!(
             lines
                 .iter()
@@ -5103,10 +5485,7 @@ mod blockcheck_parser_tests {
     #[test]
     fn splits_quoted_arguments() {
         let args = split_windows_command_line(r#"--hostlist="C:\my lists\list.txt" --new"#);
-        assert_eq!(
-            args,
-            vec![r"--hostlist=C:\my lists\list.txt", "--new"]
-        );
+        assert_eq!(args, vec![r"--hostlist=C:\my lists\list.txt", "--new"]);
     }
 }
 
@@ -5142,7 +5521,10 @@ mod clipboard_restore_tests {
     #[test]
     fn unknown_or_non_text_content_is_never_wiped() {
         // Картинка/файлы/GlobalSize = 0: неизвестное не стираем.
-        assert_eq!(restore_action(&ReadOutcome::Unavailable), RestoreAction::Leave);
+        assert_eq!(
+            restore_action(&ReadOutcome::Unavailable),
+            RestoreAction::Leave
+        );
     }
 
     #[test]

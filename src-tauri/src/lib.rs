@@ -483,6 +483,11 @@ async fn find_running_winws() -> Option<String> {
 
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
+    // explorer с несуществующим путём молча открывает «Документы»:
+    // лучше вернуть ошибку, чем показать пользователю чужую папку.
+    if !Path::new(&path).is_dir() {
+        return Err(format!("Папка не найдена: {path}"));
+    }
     Command::new("explorer")
         .arg(path)
         .spawn()

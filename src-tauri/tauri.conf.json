@@ -1,42 +1,43 @@
-{
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Zapret Tools",
-  "version": "../package.json",
-  "identifier": "com.zapret.tools",
-  "build": { "frontendDist": "../src" },
-  "app": {
-    "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "Zapret Tools",
-        "width": 1100,
-        "height": 850,
-        "resizable": true,
-        "dragDropEnabled": true,
-        "devtools": true
-      }
-    ],
-    "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; connect-src 'self' ipc: http://ipc.localhost;"
-    }
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/example/zapret-tools/releases/latest/download/latest.json"
-      ],
-      "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    }
-  },
-  "bundle": {
-    "active": true,
-    "targets": ["nsis"],
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
-    ]
-  }
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zapret Tools",
+  "version": "../package.json",
+  "identifier": "com.zapret.tools",
+  "build": { "frontendDist": "../src" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Zapret Tools",
+        "width": 1100,
+        "height": 850,
+        "resizable": true,
+        "dragDropEnabled": true,
+        "devtools": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; connect-src 'self' ipc: http://ipc.localhost;"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/CurnMen/Zapret-tools/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwOTY4M0FDODY0MkI3MTUKUldRVnQwS0dySU9XTUtHSlphWDVRZkt0RWNXRUZDRTBKaTRZOVo2ZWxWNG5YWTR2eWxGWHMzdlYK"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
 }

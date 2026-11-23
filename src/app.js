@@ -391,12 +391,15 @@
     }
   }
 
-  $id('btnOpenRoot').onclick = () => { if (state.rootPath) invoke('open_folder', { path: state.rootPath }); };
+  $id('btnOpenRoot').onclick = () => {
+    if (!state.rootPath) return;
+    invoke('open_folder', { path: state.rootPath }).catch((e) => showToast(String(e), 'error'));
+  };
   $id('btnOpenRunning').onclick = () => {
-    if (state.runningWinwsPath && state.runningWinwsPath.includes('\\bin\\winws.exe')) {
-      let dir = state.runningWinwsPath.substring(0, state.runningWinwsPath.lastIndexOf('\\'));
-      if (dir.toLowerCase().endsWith('\\bin')) dir = dir.substring(0, dir.lastIndexOf('\\'));
-      invoke('open_folder', { path: dir });
+    if (state.runningWinwsPath && /[\\/]winws\.exe$/i.test(state.runningWinwsPath)) {
+      let dir = state.runningWinwsPath.replace(/[\\/][^\\/]+$/, '');
+      if (/[\\/]bin$/i.test(dir)) dir = dir.replace(/[\\/]bin$/i, '');
+      invoke('open_folder', { path: dir }).catch((e) => showToast(String(e), 'error'));
     } else showToast('Не удалось определить путь к запущенной версии.', 'error');
   };
 

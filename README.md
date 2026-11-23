@@ -45,7 +45,7 @@
 **Сборка:**
 ```bash
 # 1. Клонируйте репозиторий
-git clone https://github.com/ВАШ_НИК/Zapret-tools.git
+git clone https://github.com/CurnMen/Zapret-tools.git
 cd Zapret-tools
 
 # 2. Установите зависимости фронтенда

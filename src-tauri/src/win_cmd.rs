@@ -41,20 +41,28 @@ pub(crate) fn decode_console_output(bytes: &[u8]) -> String {
 
 #[cfg(windows)]
 fn decode_oem(bytes: &[u8]) -> Option<String> {
-    use windows::Win32::Globalization::{
-        MultiByteToWideChar, CP_OEMCP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
-    };
+    use windows::Win32::Globalization::CP_OEMCP;
+    decode_with_code_page(CP_OEMCP, bytes)
+}
+
+/// Декодирует байты в заданной кодовой странице Windows.
+///
+/// Вынесено отдельно, чтобы тест не зависел от системной OEM-кодировки:
+/// на англоязычной Windows `CP_OEMCP` — это 437, а не 866.
+#[cfg(windows)]
+fn decode_with_code_page(code_page: u32, bytes: &[u8]) -> Option<String> {
+    use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
 
     if bytes.len() > i32::MAX as usize {
         return None;
     }
     let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
-    let len = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, None) };
+    let len = unsafe { MultiByteToWideChar(code_page, flags, bytes, None) };
     if len <= 0 {
         return None;
     }
     let mut buffer = vec![0u16; len as usize];
-    let written = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, Some(&mut buffer)) };
+    let written = unsafe { MultiByteToWideChar(code_page, flags, bytes, Some(&mut buffer)) };
     if written <= 0 {
         return None;
     }
@@ -266,9 +274,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn decodes_oem_console_output() {
-        // «Привет» в cp866 и та же строка в UTF-8.
+        // cp866 «Привет»: проверяем явную кодовую страницу, иначе результат
+        // зависит от системной OEM-кодировки (437 на англоязычной Windows).
         let oem = [0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2];
-        assert_eq!(decode_console_output(&oem), "Привет");
+        assert_eq!(decode_with_code_page(866, &oem).as_deref(), Some("Привет"));
         assert_eq!(decode_console_output("Привет".as_bytes()), "Привет");
         assert_eq!(decode_console_output(b"plain ascii"), "plain ascii");
         assert_eq!(decode_console_output(&[]), "");

@@ -41,13 +41,33 @@ jobs:
             Write-Warning "Tag $tag does not contain version $version from package.json"
           }
 
+      # Файл из `tauri signer generate -w` хранится в base64, а сам ключ — это две
+      # строки, первая из которых `untrusted comment:`. Принимаем оба вида,
+      # иначе tauri падает с «Missing comment in secret key».
+      - name: Prepare updater signing key
+        shell: pwsh
+        env:
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RAW_KEY)) {
+            throw "Secret TAURI_SIGNING_PRIVATE_KEY is not set"
+          }
+          if ($env:RAW_KEY -match 'untrusted comment') {
+            $key = $env:RAW_KEY
+          } else {
+            $key = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:RAW_KEY))
+          }
+          $path = Join-Path $env:RUNNER_TEMP 'updater.key'
+          [IO.File]::WriteAllText($path, $key.Trim() + "`n", [Text.UTF8Encoding]::new($false))
+          Write-Host "Signing key prepared"
+
       # tauri-action собирает NSIS, подписывает артефакты ключом из секретов
       # и публикует релиз вместе с latest.json для tauri-plugin-updater.
       - name: Build, sign and publish
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}\updater.key
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}

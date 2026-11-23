@@ -78,3 +78,10 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+      # tauri-action заливает инсталлятор и latest.json, портативный exe — отдельно.
+      - name: Upload portable exe
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" "src-tauri/target/release/zapret-tools.exe" --clobber

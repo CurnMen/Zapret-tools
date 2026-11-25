@@ -1,13 +1,14 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{ProcessesToUpdate, System};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -389,6 +390,19 @@ fn create_locked_temp_file(path: &Path, content: &[u8]) -> std::io::Result<fs::F
         file.flush()?;
         Ok(file)
     }
+}
+
+/// PowerShell-код чтения временного файла, удерживаемого `create_locked_temp_file`.
+/// `[IO.File]::ReadAllText` открывает файл с `FileShare.Read` и падает с «файл
+/// используется другим процессом»: наш дескриптор держит запись. Поэтому читаем
+/// через FileStream, явно разрешая совместный доступ на запись.
+fn ps_read_locked_temp(path: &Path) -> String {
+    format!(
+        "$stream = [IO.File]::Open({temp}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)\r\n\
+$content = (New-Object System.IO.StreamReader($stream, [Text.Encoding]::UTF8)).ReadToEnd()\r\n\
+$stream.Dispose()\r\n",
+        temp = ps_quote(&path.to_string_lossy())
+    )
 }
 
 /// Ссылки на скачивание списков ограничены GitHub по HTTPS.
@@ -3787,11 +3801,11 @@ async fn update_hosts(entries: Vec<String>) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", temp.display()))?;
 
     let script = format!(
-        "$content = [IO.File]::ReadAllText({temp}, [Text.Encoding]::UTF8)\r\n\
+        "{read}\
 $enc = New-Object System.Text.UTF8Encoding -ArgumentList $false\r\n\
 [IO.File]::WriteAllText({hosts}, $content, $enc)\r\n\
 ipconfig /flushdns | Out-Null\r\n",
-        temp = ps_quote(&temp.to_string_lossy()),
+        read = ps_read_locked_temp(&temp),
         hosts = ps_quote(&path.to_string_lossy())
     );
 
@@ -3953,11 +3967,11 @@ async fn auto_update_hosts() -> Result<String, String> {
         .map_err(|e| format!("{}: {e}", temp.display()))?;
 
     let script = format!(
-        "$content = [IO.File]::ReadAllText({temp}, [Text.Encoding]::UTF8)\r\n\
+        "{read}\
 $enc = New-Object System.Text.UTF8Encoding -ArgumentList $false\r\n\
 [IO.File]::WriteAllText({hosts}, $content, $enc)\r\n\
 ipconfig /flushdns | Out-Null\r\n",
-        temp = ps_quote(&temp.to_string_lossy()),
+        read = ps_read_locked_temp(&temp),
         hosts = ps_quote(&path.to_string_lossy())
     );
 
@@ -4160,12 +4174,25 @@ async fn run_zapret_tests(version_path: String) -> Result<String, String> {
 
 // ---------- Blockcheck ----------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockcheckReport {
     pub log: String,
     pub strategies: Vec<String>,
     pub log_path: String,
     pub source: String,
+}
+
+/// Задание для привилегированного воркера (-blockcheck-worker).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BlockcheckJob {
+    version_path: String,
+    domains: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BlockcheckWorkerResult {
+    report: Option<BlockcheckReport>,
+    error: Option<String>,
 }
 
 /// .bat-стратегии в корне сборки. `service.bat` — служебный, его не тестируем.
@@ -4309,7 +4336,17 @@ fn extract_winws_invocation(line: &str) -> Option<(String, Vec<String>)> {
     let index = lowered.find("winws.exe")?;
     let prefix = &line[..index];
     let start = match prefix.rfind('"') {
-        Some(quote) if !prefix[quote + 1..].contains(char::is_whitespace) => quote,
+        // Кавычка — открывающая для пути к exe: сразу после неё идёт путь.
+        // Пробелы ВНУТРИ пути допустимы (C:\Program Files\...), поэтому
+        // проверяем только первый символ, а не весь остаток.
+        Some(quote)
+            if prefix[quote + 1..]
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_whitespace()) =>
+        {
+            quote
+        }
         _ => prefix
             .rfind(char::is_whitespace)
             .map(|space| space + 1)
@@ -4346,18 +4383,43 @@ fn winws_command_line(exe: &str, args: &[String]) -> String {
     line
 }
 
+/// Ставит IPv4 перед IPv6, сохраняя порядок внутри семейства.
+///
+/// `getaddrinfo` на Windows часто отдаёт IPv6 первым, а при «чёрной дыре»
+/// IPv6 первый connect съедает весь таймаут запроса. IPv6 остаётся в списке:
+/// если IPv4 не отвечает, соединение всё равно попробует его.
+fn ipv4_first(mut addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    addrs.sort_by_key(|addr| u8::from(addr.is_ipv6()));
+    addrs
+}
+
 async fn probe_strategy(client: &reqwest::Client, domains: &[String]) -> (bool, String) {
+    // Раньше домены опрашивались по очереди и таймауты складывались.
+    // Сейчас все запросы идут одновременно: время прогона — самый медленный
+    // домен, а не их сумма. Побочного эффекта на winws нет: он один на стратегию.
+    let mut tasks = tokio::task::JoinSet::new();
+    for domain in domains.iter().cloned() {
+        let client = client.clone();
+        tasks.spawn(async move {
+            let url = format!("https://{domain}/");
+            let outcome = match client.get(&url).send().await {
+                Ok(response) => Ok(response.status().as_u16()),
+                Err(err) => Err(err.to_string()),
+            };
+            (domain, outcome)
+        });
+    }
+
     let mut failure = String::new();
-    for domain in domains {
-        let url = format!("https://{domain}/");
-        match client.get(&url).send().await {
-            Ok(response) => {
-                let code = response.status().as_u16();
-                // Любой HTTP-ответ означает, что соединение прошло. DPI-блок
-                // обычно рвёт TLS, а не отдаёт страницу.
-                if code < 500 {
-                    return (true, format!("{domain} — HTTP {code}"));
-                }
+    while let Some(joined) = tasks.join_next().await {
+        let Ok((domain, outcome)) = joined else {
+            continue;
+        };
+        match outcome {
+            // Любой HTTP-ответ означает, что соединение прошло. DPI-блок
+            // обычно рвёт TLS, а не отдаёт страницу.
+            Ok(code) if code < 500 => return (true, format!("{domain} — HTTP {code}")),
+            Ok(code) => {
                 if failure.is_empty() {
                     failure = format!("{domain} — HTTP {code}");
                 }
@@ -4369,11 +4431,230 @@ async fn probe_strategy(client: &reqwest::Client, domains: &[String]) -> (bool, 
             }
         }
     }
+    if failure.is_empty() {
+        // Все задачи упали с паникой (JoinError) — без текста отказ выглядел
+        // как пустая строка `[FAIL]` в отчёте.
+        failure = "нет ответа ни от одного домена".to_string();
+    }
     (false, failure)
 }
 
-/// Проверяет .bat-стратегии из корня сборки: запускает winws, ждёт 2,5 с,
-/// запрашивает домены с таймаутом 3 с и гасит процесс.
+/// Окружение в духе `service.bat` — всё собирается в одном блокирующем вызове,
+/// чтобы не гонять по одному процессу на каждую проверку.
+#[derive(Debug, Default)]
+struct EnvironmentChecks {
+    running_winws: Option<String>,
+    service_state: Option<String>,
+    bfe_running: Option<bool>,
+    windivert_service: Option<String>,
+    conflicts: Vec<String>,
+    windivert_driver: bool,
+    cyrillic_path: bool,
+    one_drive: bool,
+    hosts_blocked: bool,
+}
+
+/// Разбирает состояние службы из вывода `sc query`.
+///
+/// Строка состояния локализована («STATE» / «СОСТОЯНИЕ» / «STATUS»), поэтому
+/// опираемся не на подпись, а на само значение: `: 4  RUNNING`.
+fn parse_sc_state(text: &str) -> Option<String> {
+    const STATES: [&str; 7] = [
+        "RUNNING",
+        "STOPPED",
+        "START_PENDING",
+        "STOP_PENDING",
+        "PAUSE_PENDING",
+        "CONTINUE_PENDING",
+        "PAUSED",
+    ];
+    for line in text.lines() {
+        let Some((_, value)) = line.trim().split_once(':') else {
+            continue;
+        };
+        let Some(token) = value.split_whitespace().last() else {
+            continue;
+        };
+        if let Some(state) = STATES
+            .iter()
+            .find(|state| token.eq_ignore_ascii_case(state))
+        {
+            return Some((*state).to_string());
+        }
+    }
+    None
+}
+
+/// Состояние службы через `sc query`. `None` — службы нет или `sc` не ответил.
+fn sc_service_state(name: &str) -> Option<String> {
+    let mut command = Command::new("sc");
+    hide_console(&mut command);
+    let output = command.args(["query", name]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // `sc` пишет в OEM-кодировке, как и PowerShell при перенаправлении.
+    parse_sc_state(&crate::win_cmd::decode_console_output(&output.stdout))
+}
+
+fn sc_service_exists(name: &str) -> bool {
+    let mut command = Command::new("sc");
+    hide_console(&mut command);
+    command
+        .args(["query", name])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// `hosts` именно блокирует YouTube (0.0.0.0/127.0.0.1), а не просто упоминает
+/// домен: записи авто-обновления Flowseal — обычные IP и блокировкой не являются.
+fn hosts_blocks_youtube(text: &str) -> bool {
+    text.lines().any(|line| {
+        let content = line.split('#').next().unwrap_or("").trim();
+        let mut parts = content.split_whitespace();
+        let Some(address) = parts.next() else {
+            return false;
+        };
+        if !matches!(address, "0.0.0.0" | "127.0.0.1" | "::1") {
+            return false;
+        }
+        parts.any(|host| {
+            let host = host.to_ascii_lowercase();
+            host == "youtube.com"
+                || host.ends_with(".youtube.com")
+                || host == "youtu.be"
+                || host.ends_with(".youtu.be")
+        })
+    })
+}
+
+fn collect_environment_checks(version_path: &str) -> EnvironmentChecks {
+    let mut out = EnvironmentChecks::default();
+    let mut sys = System::new_all();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    for process in sys.processes().values() {
+        let name = process.name().to_string_lossy().to_ascii_lowercase();
+        if name.contains("winws") {
+            // Путь чужого (служебного) процесса без прав может быть недоступен,
+            // но сам факт запуска виден всегда — иначе предупреждение
+            // «уже запущен winws» пропадало.
+            let path = process
+                .exe()
+                .map(|path| path.to_string_lossy().to_string())
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| format!("{name} (PID {})", process.pid()));
+            out.running_winws = Some(path);
+        }
+        if matches!(
+            name.as_str(),
+            "adguardsvc.exe" | "goodbyedpi.exe" | "winws1.exe" | "winws2.exe"
+        ) {
+            out.conflicts.push(name);
+        }
+    }
+
+    out.service_state = sc_service_state("zapret");
+    // Base Filtering Engine нужен winws: без него фильтрация не заработает,
+    // и все стратегии выглядели бы «нерабочими» без объяснения причины.
+    out.bfe_running = sc_service_state("BFE").map(|state| state.eq_ignore_ascii_case("RUNNING"));
+    out.windivert_service = sc_service_state("WinDivert");
+    // Только службы из списка service.bat. Поиск по всему выводу `sc query`
+    // ловил системные службы вроде «Network Connectivity Assistant».
+    for name in ["GoodbyeDPI", "discordfix_zapret", "winws1", "winws2"] {
+        if sc_service_exists(name) {
+            // Служба `winws1` и процесс `winws1.exe` — один и тот же конфликт:
+            // запись о службе информативнее, поэтому процесс не дублируем.
+            let process = format!("{name}.exe");
+            out.conflicts
+                .retain(|item| !item.eq_ignore_ascii_case(&process));
+            out.conflicts.push(format!("{name} (служба)"));
+        }
+    }
+    out.conflicts.sort();
+    out.conflicts.dedup();
+
+    let root = Path::new(version_path);
+    out.windivert_driver = fs::read_dir(root.join("bin"))
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .map(|ext| ext.eq_ignore_ascii_case("sys"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    out.cyrillic_path = version_path
+        .chars()
+        .any(|c| ('\u{0400}'..='\u{052f}').contains(&c));
+    if let Ok(one_drive) = std::env::var("OneDrive") {
+        out.one_drive = !one_drive.is_empty()
+            && version_path
+                .to_ascii_lowercase()
+                .starts_with(&one_drive.to_ascii_lowercase());
+    }
+    if let Ok(text) = fs::read_to_string(hosts_file_path()) {
+        out.hosts_blocked = hosts_blocks_youtube(&text);
+    }
+    out
+}
+
+fn format_environment_diagnostics(checks: &EnvironmentChecks) -> String {
+    let state = checks.service_state.as_deref().unwrap_or("не найдена");
+    let winws = checks.running_winws.as_deref().unwrap_or("не запущен");
+    let conflicts = if checks.conflicts.is_empty() {
+        "нет".to_string()
+    } else {
+        checks.conflicts.join(", ")
+    };
+    let mut lines = format!(
+        "[DIAG] Окружение (аналог service.bat, проверки параллельно):\r\n\
+[DIAG] Служба zapret: {state}\r\n\
+[DIAG] winws: {winws}\r\n\
+[DIAG] Конфликтующие процессы/службы: {conflicts}\r\n"
+    );
+    lines.push_str(match checks.bfe_running {
+        Some(true) => "[DIAG][OK] Base Filtering Engine работает\r\n",
+        Some(false) => {
+            "[DIAG][WARN] Base Filtering Engine остановлен — winws не сможет фильтровать трафик\r\n"
+        }
+        None => "[DIAG] Base Filtering Engine: проверить не удалось\r\n",
+    });
+    if let Some(state) = checks.windivert_service.as_deref() {
+        if state.eq_ignore_ascii_case("RUNNING") && checks.running_winws.is_none() {
+            lines.push_str(
+                "[DIAG][WARN] Служба WinDivert активна, а winws не запущен — возможно, остался старый драйвер\r\n",
+            );
+        }
+    }
+    lines.push_str(if checks.windivert_driver {
+        "[DIAG][OK] Драйвер WinDivert в bin\\ найден\r\n"
+    } else {
+        "[DIAG][WARN] Драйвер WinDivert в bin\\ не найден\r\n"
+    });
+    lines.push_str(if checks.cyrillic_path {
+        "[DIAG][WARN] Кириллица в пути установки\r\n"
+    } else {
+        "[DIAG][OK] Кириллицы в пути нет\r\n"
+    });
+    lines.push_str(if checks.one_drive {
+        "[DIAG][WARN] Папка Zapret лежит в OneDrive\r\n"
+    } else {
+        "[DIAG][OK] OneDrive не мешает\r\n"
+    });
+    lines.push_str(if checks.hosts_blocked {
+        "[DIAG][WARN] YouTube заблокирован в hosts (0.0.0.0/127.0.0.1) — проверка будет неточной\r\n"
+    } else {
+        "[DIAG][OK] hosts не блокирует YouTube\r\n"
+    });
+    lines
+}
+
+/// Проверяет .bat-стратегии из корня сборки: запускает winws, ждёт готовности
+/// (первая проба через 1,2 с, до 2,5 с), запрашивает домены с таймаутом 3 с
+/// и гасит процесс.
 async fn run_strategy_blockcheck(
     version_path: &str,
     domains: &[String],
@@ -4388,25 +4669,56 @@ async fn run_strategy_blockcheck(
 
     let root = Path::new(version_path);
     let (game_tcp, game_udp) = strategy_game_filter_ports(version_path);
-    let client = reqwest::Client::builder()
+    // На машинах с «чёрной дырой» IPv6 первый connect съедал весь таймаут,
+    // и рабочая стратегия ошибочно считалась нерабочей. Резолвим домены сами
+    // и ставим IPv4 первым: IPv6 остаётся в списке как резерв.
+    let resolved: Vec<(String, Vec<SocketAddr>)> = {
+        let domains = domains.to_vec();
+        tokio::task::spawn_blocking(move || {
+            domains
+                .into_iter()
+                .filter_map(|domain| {
+                    let addrs: Vec<SocketAddr> =
+                        (domain.as_str(), 443u16).to_socket_addrs().ok()?.collect();
+                    (!addrs.is_empty()).then(|| (domain, ipv4_first(addrs)))
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    };
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .connect_timeout(Duration::from_secs(3))
-        .user_agent("ZapretTools/1.0")
-        .build()
-        .map_err(|e| e.to_string())?;
+        // Иначе соединение, открытое удачной стратегией, переиспользуется
+        // следующей: она «проходит» без своего обхода, и результат врёт.
+        .pool_max_idle_per_host(0)
+        .user_agent("ZapretTools/1.0");
+    for (domain, addrs) in &resolved {
+        builder = builder.resolve_to_addrs(domain, addrs);
+    }
+    let client = builder.build().map_err(|e| e.to_string())?;
 
     let mut log = String::from(
         "[INFO] blockcheck.cmd не найден — проверяются .bat-стратегии из корня сборки.\r\n",
     );
+    // Окружение (аналог service.bat) и базовый доступ к доменам меряем
+    // одновременно: сканирование процессов и `sc query` не складываются
+    // с сетевыми таймаутами.
+    let vp = version_path.to_string();
+    let (checks, baseline) = tokio::join!(
+        tokio::task::spawn_blocking(move || collect_environment_checks(&vp)),
+        probe_strategy(&client, domains)
+    );
+    let checks = checks.unwrap_or_default();
+    log.push_str(&format_environment_diagnostics(&checks));
     if !is_running_as_admin() {
         log.push_str("[WARN] Нет прав администратора: winws может не примениться.\r\n");
     }
-    if let Some(winws) = find_running_winws().await {
-        log.push_str(&format!(
-            "[WARN] Уже запущен {winws}. Остановите службу Zapret, иначе проверка будет неточной.\r\n"
-        ));
+    if checks.running_winws.is_some() {
+        log.push_str("[WARN] Уже запущен winws. Остановите службу Zapret, иначе проверка будет неточной.\r\n");
     }
-    let (baseline_ok, baseline_detail) = probe_strategy(&client, domains).await;
+    let (baseline_ok, baseline_detail) = baseline;
     if baseline_ok {
         log.push_str(&format!(
             "[WARN] Домены доступны без стратегии ({baseline_detail}) — возможны ложноположительные результаты.\r\n"
@@ -4486,24 +4798,44 @@ async fn run_strategy_blockcheck(
             }
         };
 
-        tokio::time::sleep(Duration::from_millis(2500)).await;
-        if let Ok(Some(status)) = child.try_wait() {
-            log.push_str(&format!(
-                "[FAIL] winws завершился с кодом {}\r\n",
-                status.code().unwrap_or(-1)
-            ));
-            continue;
-        }
-
-        let (ok, detail) = probe_strategy(&client, domains).await;
+        // Фиксированная пауза 2,5 с на каждую стратегию замедляла прогон:
+        // рабочую стратегию видно уже через ~1,2 с. Ждём адаптивно — первая
+        // проба через 1,2 с, повторы до 2,5 с. Нерабочая стратегия всё равно
+        // получает полное окно, поэтому точность не страдает.
+        let deadline = Instant::now() + Duration::from_millis(2500);
+        let mut ready_at = Instant::now() + Duration::from_millis(1200);
+        let outcome = loop {
+            // Упавший winws (неверные аргументы) видно за 300 мс, а не за 2,5 с.
+            if let Ok(Some(status)) = child.try_wait() {
+                break Err(format!(
+                    "winws завершился с кодом {}",
+                    status.code().unwrap_or(-1)
+                ));
+            }
+            let now = Instant::now();
+            if now < ready_at {
+                tokio::time::sleep((ready_at - now).min(Duration::from_millis(300))).await;
+                continue;
+            }
+            let (ok, detail) = probe_strategy(&client, domains).await;
+            if ok {
+                break Ok(detail);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break Err(detail);
+            }
+            ready_at = now + Duration::from_millis(600);
+        };
         let _ = child.kill();
         let _ = child.wait();
 
-        if ok {
-            log.push_str(&format!("[OK] {detail}\r\n"));
-            working.push(winws_command_line(&exe_path.to_string_lossy(), &args));
-        } else {
-            log.push_str(&format!("[FAIL] {detail}\r\n"));
+        match outcome {
+            Ok(detail) => {
+                log.push_str(&format!("[OK] {detail}\r\n"));
+                working.push(winws_command_line(&exe_path.to_string_lossy(), &args));
+            }
+            Err(detail) => log.push_str(&format!("[FAIL] {detail}\r\n")),
         }
     }
 
@@ -4626,8 +4958,8 @@ fn run_blockcheck_process(
         .wait_with_output()
         .map_err(|e| format!("ошибка ожидания {cmd_name}: {e}"))?;
 
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut text = crate::win_cmd::decode_console_output(&output.stdout);
+    let stderr = crate::win_cmd::decode_console_output(&output.stderr);
     if !stderr.trim().is_empty() {
         if !text.is_empty() {
             text.push_str("\r\n");
@@ -4671,8 +5003,21 @@ async fn run_blockcheck(
         return Err("Укажите корректные домены для проверки".into());
     }
 
-    let Some(cmd_path) = find_blockcheck_cmd(&version_path) else {
-        return run_strategy_blockcheck(&version_path, &domains).await;
+    // winws требует повышения. Вместо десятков [SKIP] (os error 740)
+    // один раз показываем UAC и запускаем тот же код в привилегированном
+    // воркере — логика проверки не дублируется.
+    if !is_running_as_admin() {
+        return run_blockcheck_elevated(&version_path, &domains).await;
+    }
+    run_blockcheck_inner(&version_path, &domains).await
+}
+
+async fn run_blockcheck_inner(
+    version_path: &str,
+    domains: &[String],
+) -> Result<BlockcheckReport, String> {
+    let Some(cmd_path) = find_blockcheck_cmd(version_path) else {
+        return run_strategy_blockcheck(version_path, domains).await;
     };
 
     let dir = cmd_path
@@ -4686,7 +5031,7 @@ async fn run_blockcheck(
     let log_path = dir.join("blockcheck.log");
 
     let dir_for_task = dir.clone();
-    let domains_for_task = domains.clone();
+    let domains_for_task = domains.to_vec();
     let cmd_for_task = cmd_name.clone();
 
     let log = tokio::task::spawn_blocking(move || {
@@ -4703,6 +5048,111 @@ async fn run_blockcheck(
         log_path: log_path.display().to_string(),
         source: cmd_path.display().to_string(),
     })
+}
+
+async fn run_blockcheck_elevated(
+    version_path: &str,
+    domains: &[String],
+) -> Result<BlockcheckReport, String> {
+    let job = BlockcheckJob {
+        version_path: version_path.to_string(),
+        domains: domains.to_vec(),
+    };
+    let payload = serde_json::to_vec(&job).map_err(|e| e.to_string())?;
+    let job_path = unique_temp_path("zapret-blockcheck-job", "json");
+    let result_path = unique_temp_path("zapret-blockcheck-result", "json");
+    let _ = fs::remove_file(&result_path);
+    // Дескриптор живёт до конца работы воркера: подменить задание по пути
+    // между записью и чтением привилегированный процесс не даст.
+    let guard = create_locked_temp_file(&job_path, &payload)
+        .map_err(|e| format!("{}: {e}", job_path.display()))?;
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Start-Process не заключает элементы -ArgumentList в кавычки сам:
+    // путь с пробелами (%TEMP% другого пользователя) иначе развалится
+    // на два аргумента.
+    let args_line = format!(
+        "--blockcheck-worker \"{}\" \"{}\"",
+        job_path.display(),
+        result_path.display()
+    );
+    let body = format!(
+        "$p = Start-Process -FilePath {exe} -ArgumentList {args} -Wait -PassThru -WindowStyle Hidden\r\n\
+if ($p.ExitCode -ne 0) {{ throw ('Blockcheck worker завершился с кодом ' + $p.ExitCode) }}\r\n",
+        exe = ps_quote(&exe.to_string_lossy()),
+        args = ps_quote(&args_line)
+    );
+
+    let joined = tokio::task::spawn_blocking(move || run_elevated_script(&body)).await;
+    // Воркер не может удалить задание сам: наш дескриптор не разрешает delete.
+    // Чистка идёт до разбора результата: `?` на панике блокирующей задачи
+    // раньше выходил отсюда и оставлял файл с доменами в %TEMP%.
+    drop(guard);
+    let _ = fs::remove_file(&job_path);
+    let elevated = match joined {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = fs::remove_file(&result_path);
+            return Err(err.to_string());
+        }
+    };
+    if let Err(err) = elevated {
+        // Воркер мог успеть создать файл результата даже при ненулевом коде.
+        let _ = fs::remove_file(&result_path);
+        return Err(err);
+    }
+
+    let text = match fs::read_to_string(&result_path) {
+        Ok(text) => text,
+        Err(err) => {
+            let _ = fs::remove_file(&result_path);
+            return Err(format!(
+                "Привилегированный воркер не вернул результат: {err}"
+            ));
+        }
+    };
+    let result: BlockcheckWorkerResult = match serde_json::from_str(&text) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = fs::remove_file(&result_path);
+            return Err(format!("Некорректный результат воркера: {err}"));
+        }
+    };
+    let _ = fs::remove_file(&result_path);
+    match result.report {
+        Some(report) => Ok(report),
+        None => Err(result
+            .error
+            .unwrap_or_else(|| "Воркер не вернул отчёт".to_string())),
+    }
+}
+
+/// Точка входа привилегированного процесса (вызывается из `main.rs`).
+pub fn run_blockcheck_worker(job_path: PathBuf, result_path: PathBuf) {
+    let result = (|| -> Result<BlockcheckReport, String> {
+        let bytes = fs::read(&job_path).map_err(|e| format!("Задание: {e}"))?;
+        let job: BlockcheckJob =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Задание: {e}"))?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        runtime.block_on(run_blockcheck_inner(&job.version_path, &job.domains))
+    })();
+    let payload = BlockcheckWorkerResult {
+        report: result.as_ref().ok().cloned(),
+        error: result.as_ref().err().cloned(),
+    };
+    if let Ok(text) = serde_json::to_string(&payload) {
+        // create_new: привилегированный процесс не перезапишет файл, который
+        // кто-то успел подставить по этому пути (симлинк/джункшн).
+        let _ = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&result_path)
+            .and_then(|mut file| file.write_all(text.as_bytes()));
+    }
+    let _ = fs::remove_file(&job_path);
 }
 
 #[tauri::command]
@@ -5631,6 +6081,16 @@ mod blockcheck_parser_tests {
     }
 
     #[test]
+    fn extracts_winws_from_path_with_spaces() {
+        let (exe, args) = extract_winws_invocation(
+            r#"start "zapret: general" /min "C:\Program Files\zapret\bin\winws.exe" --wf-tcp=80,443"#,
+        )
+        .expect("winws command");
+        assert_eq!(exe, r"C:\Program Files\zapret\bin\winws.exe");
+        assert_eq!(args, vec!["--wf-tcp=80,443"]);
+    }
+
+    #[test]
     fn expands_bat_variables() {
         let lines = logical_bat_lines(
             "set \"BIN=%~dp0bin\\\"\r\nstart winws.exe --bin=\"%BIN%\" --port=%GameFilterTCP%\r\n",
@@ -5648,6 +6108,71 @@ mod blockcheck_parser_tests {
     fn splits_quoted_arguments() {
         let args = split_windows_command_line(r#"--hostlist="C:\my lists\list.txt" --new"#);
         assert_eq!(args, vec![r"--hostlist=C:\my lists\list.txt", "--new"]);
+    }
+
+    #[test]
+    fn blockcheck_job_json_roundtrip() {
+        let job = BlockcheckJob {
+            version_path: r"C:\zapret".to_string(),
+            domains: vec!["youtube.com".to_string(), "discord.com".to_string()],
+        };
+        let json = serde_json::to_string(&job).expect("serialize");
+        let restored: BlockcheckJob = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.version_path, job.version_path);
+        assert_eq!(restored.domains, job.domains);
+    }
+
+    #[test]
+    fn environment_diagnostics_cover_service_and_hosts() {
+        let checks = EnvironmentChecks {
+            running_winws: Some(r"C:\z\winws.exe".to_string()),
+            service_state: Some("RUNNING".to_string()),
+            bfe_running: Some(false),
+            windivert_service: None,
+            conflicts: vec!["GoodbyeDPI (служба)".to_string()],
+            windivert_driver: false,
+            cyrillic_path: true,
+            one_drive: false,
+            hosts_blocked: true,
+        };
+        let text = format_environment_diagnostics(&checks);
+        assert!(text.contains("Служба zapret: RUNNING"));
+        assert!(text.contains("GoodbyeDPI"));
+        assert!(text.contains("Base Filtering Engine остановлен"));
+        assert!(text.contains("Кириллица"));
+        assert!(text.contains("YouTube заблокирован в hosts"));
+    }
+
+    #[test]
+    fn parses_sc_state_in_any_locale() {
+        let english = "SERVICE_NAME: zapret\r\n        TYPE               : 10  WIN32_OWN_PROCESS\r\n        STATE              : 4  RUNNING\r\n";
+        assert_eq!(parse_sc_state(english).as_deref(), Some("RUNNING"));
+        let russian = "ИМЯ_СЛУЖБЫ: zapret\r\n        ТИП                : 10  WIN32_OWN_PROCESS\r\n        СОСТОЯНИЕ          : 1  STOPPED\r\n";
+        assert_eq!(parse_sc_state(russian).as_deref(), Some("STOPPED"));
+        assert_eq!(parse_sc_state("FAILED 1060: service does not exist"), None);
+    }
+
+    #[test]
+    fn ipv4_addresses_are_tried_first() {
+        let v6: SocketAddr = "[::1]:443".parse().expect("ipv6");
+        let v4: SocketAddr = "127.0.0.1:443".parse().expect("ipv4");
+        assert_eq!(ipv4_first(vec![v6, v4]), vec![v4, v6]);
+        // Если IPv6 единственный (IPv6-only сеть), он остаётся.
+        assert_eq!(ipv4_first(vec![v6]), vec![v6]);
+    }
+
+    #[test]
+    fn hosts_blocking_requires_a_blocking_address() {
+        assert!(hosts_blocks_youtube("0.0.0.0 youtube.com\r\n"));
+        assert!(hosts_blocks_youtube(
+            "127.0.0.1 www.youtube.com # comment\r\n"
+        ));
+        assert!(hosts_blocks_youtube("::1 youtu.be\r\n"));
+        // Записи авто-обновления Flowseal — обычные IP, это не блокировка.
+        assert!(!hosts_blocks_youtube(
+            "142.250.74.46 youtube.com\r\n# 0.0.0.0 youtube.com\r\n"
+        ));
+        assert!(!hosts_blocks_youtube("0.0.0.0 example.com\r\n"));
     }
 }
 
@@ -5810,6 +6335,8 @@ mod security_helpers_tests {
 #[cfg(all(test, windows))]
 mod hosts_temp_file_tests {
     use super::*;
+    use std::io::Read as _;
+    use std::os::windows::fs::OpenOptionsExt;
 
     #[test]
     fn locked_temp_file_rejects_writes_and_allows_reads() {
@@ -5819,7 +6346,53 @@ mod hosts_temp_file_tests {
             fs::OpenOptions::new().write(true).open(&path).is_err(),
             "второй дескриптор не должен получить запись"
         );
+        assert!(
+            fs::remove_file(&path).is_err(),
+            "открытый дескриптор не должен разрешать удаление"
+        );
         assert_eq!(fs::read(&path).unwrap(), b"payload".to_vec());
+        drop(guard);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Привилегированный скрипт читает файл через FileStream с `FileShare.ReadWrite`.
+    /// С `[IO.File]::ReadAllText` (FileShare.Read) он падал с «файл используется
+    /// другим процессом» — это ломало авто-обновление hosts.
+    #[test]
+    fn locked_temp_file_opens_for_powershell_style_read() {
+        let path = unique_temp_path("zapret-read-share-test", "txt");
+        let guard = create_locked_temp_file(&path, b"payload").expect("create");
+        let mut reader = fs::OpenOptions::new()
+            .read(true)
+            // FILE_SHARE_READ | FILE_SHARE_WRITE, как [IO.FileShare]::ReadWrite.
+            .share_mode(0x3)
+            .open(&path)
+            .expect("чтение с общим доступом должно открываться");
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"payload".to_vec());
+        drop(reader);
+        drop(guard);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Сквозная проверка: тот же PowerShell, что и в UAC-скрипте, читает
+    /// залоченный файл, а UTF-8 кириллица декодируется в 6 символов.
+    #[test]
+    fn powershell_reads_locked_temp_file() {
+        let path = unique_temp_path("zapret-ps-read-test", "txt");
+        let guard = create_locked_temp_file(&path, "привет".as_bytes()).expect("create");
+        let script = format!("{}$content.Length", ps_read_locked_temp(&path));
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("запуск powershell");
+        assert!(
+            output.status.success(),
+            "powershell: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "6");
         drop(guard);
         let _ = fs::remove_file(&path);
     }

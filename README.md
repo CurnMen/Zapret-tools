@@ -64,8 +64,12 @@
 * `TAURI_SIGNING_PRIVATE_KEY` — содержимое файла `src-tauri/keys/zapret-tools.key`;
 * `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — пароль ключа (сейчас ключ без пароля, можно оставить пустым).
 
-Локальная сборка с подписью: `TAURI_SIGNING_PRIVATE_KEY=src-tauri/keys/zapret-tools.key npm run tauri build`
-(рядом с инсталлятором появится файл `.sig`).
+Локальная сборка с подписью (PowerShell):
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = 'src-tauri\keys\zapret-tools.key'
+npm run tauri build
+```
+Рядом с инсталлятором появится файл `.sig`. `npm run redeploy` подставляет ключ сам.
 
 ## 🛠️ Для разработчиков (Сборка из исходников)
 
@@ -91,3 +95,21 @@ npm run tauri dev
 
 # 4. Соберите релизную версию (появится в src-tauri/target/release/)
 npm run tauri build
+```
+
+## 🔁 Пересборка установленной копии
+
+Если приложение установлено через NSIS, ставить инсталлятор руками после каждой правки
+не нужно:
+
+```powershell
+npm run redeploy
+```
+
+Скрипт `scripts/redeploy.ps1` соберёт релиз, подставит локальный ключ подписи
+(`src-tauri/keys/zapret-tools.key`), остановит запущенную установленную копию, тихо
+поставит новую поверх неё в тот же каталог и запустит. Каталог берётся из записи
+деинсталлятора, поэтому нестандартный путь установки (например, `E:\zapret\Zapret Tools`)
+находится сам. Настройки в `%APPDATA%\com.zapret.tools` не затрагиваются.
+
+Только переустановить последнюю сборку без компиляции: `npm run redeploy -- -SkipBuild`.

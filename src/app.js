@@ -11,6 +11,22 @@
   // (#log, #trashLog, #fileLog) остаются локальными и растут как раньше.
   const LOG_DRAWER_LIMIT = 100;
 
+  // Высота выезжающей панели зависит от числа строк: при 1–2 строках не
+  // нужно оставлять под ней 220 пустых пикселей. Заголовок — 36 px, тело
+  // ограничено 168 px (box-sizing: border-box), рамка сверху — 1 px, поэтому
+  // отступ под панель равен её фактической высоте.
+  function syncLogDrawerSpace() {
+    const drawer = $id('logDrawer');
+    const body = $id('versionsLog');
+    if (!drawer || !body) return;
+    const count = body.childElementCount;
+    const content = drawer.classList.contains('is-open') && count > 0
+      ? Math.min(168, body.scrollHeight)
+      : 0;
+    const space = count > 0 ? 36 + 1 + content : 0;
+    document.body.style.setProperty('--log-drawer-space', space + 'px');
+  }
+
   function syncLogDrawer() {
     const drawer = $id('logDrawer');
     const body = $id('versionsLog');
@@ -20,6 +36,7 @@
     document.body.classList.toggle('has-log-drawer', count > 0);
     const badge = $id('logDrawerCount');
     if (badge) badge.textContent = String(count);
+    syncLogDrawerSpace();
   }
 
   function setLogDrawerOpen(open) {
@@ -31,6 +48,7 @@
     if (toggle) toggle.setAttribute('aria-expanded', String(open));
     const hint = $id('logDrawerHint');
     if (hint) hint.textContent = open ? 'Свернуть' : 'Развернуть';
+    syncLogDrawerSpace();
 
     if (open) {
       const body = $id('versionsLog');
@@ -45,6 +63,10 @@
   $id('logDrawerToggle').onclick = () => {
     setLogDrawerOpen(!$id('logDrawer').classList.contains('is-open'));
   };
+
+  // При изменении ширины окна строки переносятся и scrollHeight меняется:
+  // без пересчёта отступ под панель остался бы от прежней раскладки.
+  window.addEventListener('resize', syncLogDrawerSpace);
 
   function logTo(el, msg, cls) {
     if (!el) return;
@@ -173,7 +195,9 @@
     clearTimeout(geometrySaveTimer);
     geometrySaveTimer = setTimeout(async () => {
       try {
-        const size = await appWindow.outerSize();
+        // setSize задаёт размер клиентской области, поэтому сохраняем innerSize,
+        // а не outerSize: иначе окно после перезапуска «растёт» на рамку.
+        const size = await appWindow.innerSize();
         const position = await appWindow.outerPosition();
         localStorage.setItem(GEOMETRY_KEY, JSON.stringify({
           width: size.width,
@@ -2258,8 +2282,10 @@
         }
       };
       row.appendChild(button);
+      // Лимит проверяем до добавления, как в logTo(): иначе строка на границе
+      // вытесняла бы саму себя и список оставался на единицу короче.
+      while (log.childElementCount >= LOG_DRAWER_LIMIT) log.firstElementChild.remove();
       log.appendChild(row);
-      while (log.childElementCount > LOG_DRAWER_LIMIT) log.firstElementChild.remove();
     });
     syncLogDrawer();
     setLogDrawerOpen(true);
@@ -2287,9 +2313,13 @@
 
       const lines = String(report.log || '').split(/\r?\n/).filter(Boolean);
       lines.forEach(line => {
-        const cls = /blocked|fail|error|ошибка/i.test(line)
+        // [WARN] (в том числе [DIAG][WARN]) — жёлтый, а не зелёный: раньше
+        // предупреждение «уже запущен winws» подсвечивалось как успех.
+        const cls = /\[fail\]|\[skip\]|blocked|error|ошибка/i.test(line)
           ? 'err'
-          : (/\[ok\]|summary|winws/i.test(line) ? 'ok' : '');
+          : (/\[warn\]/i.test(line)
+            ? 'warn'
+            : (/\[ok\]|summary/i.test(line) ? 'ok' : ''));
         logTo($id('versionsLog'), line, cls);
       });
       if (report.log_path) {

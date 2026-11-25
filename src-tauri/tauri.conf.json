@@ -11,6 +11,8 @@
         "title": "Zapret Tools",
         "width": 1100,
         "height": 850,
+        "minWidth": 960,
+        "minHeight": 680,
         "resizable": true,
         "dragDropEnabled": true,
         "devtools": true

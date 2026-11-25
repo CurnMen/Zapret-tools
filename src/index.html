@@ -221,6 +221,7 @@
     .log-line.ok::before { background: var(--positive); }
     .log-line.err::before { background: var(--danger); }
     .log-line.warn::before { background: var(--warning); }
+    .log-line.info::before { background: var(--accent); }
     .error-link { color: var(--danger); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
     .error-link:hover { color: #f08b93; }
 
@@ -375,7 +376,9 @@
        Пустая панель скрыта целиком, свёрнутая занимает только строку заголовка. */
     body { transition: padding-bottom 220ms var(--ease); }
     body.has-log-drawer { padding-bottom: 60px; }
-    body.log-drawer-open { padding-bottom: 220px; }
+    /* Запас под панель считается по числу строк: одна строка не должна
+       оставлять 220 px пустого места под вкладкой. */
+    body.log-drawer-open { padding-bottom: var(--log-drawer-space, 220px); }
 
     .log-drawer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900; display: flex; flex-direction: column; background: rgba(11, 13, 18, 0.86); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); border-top: 1px solid var(--line-strong); box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.38); }
     .log-drawer[hidden] { display: none; }
@@ -394,7 +397,7 @@
     /* Тосты не прячутся за панелью: поднимаем их над ней. */
     .toast-container { transition: bottom 220ms var(--ease); }
     body.has-log-drawer .toast-container { bottom: 56px; }
-    body.log-drawer-open .toast-container { bottom: 220px; }
+    body.log-drawer-open .toast-container { bottom: var(--log-drawer-space, 220px); }
   </style>
 </head>
 <body>
@@ -1142,7 +1145,7 @@
     <div id="blockcheckProgress" hidden>
       <div class="inline-field" style="align-items:center;">
         <span class="spinner"></span>
-        <span class="modal-text" style="margin:0;">Проверка выполняется, это может занять несколько минут…</span>
+        <span class="modal-text" style="margin:0;">Проверка выполняется, это может занять несколько минут. Если появится запрос Windows — подтвердите права администратора.</span>
       </div>
       <div class="modal-actions" style="margin-top:16px;">
         <button id="blockcheckClose" class="btn btn-secondary" type="button">Свернуть в консоль</button>

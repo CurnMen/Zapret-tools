@@ -21,6 +21,7 @@ Zapret (Flowseal). Tauri 2 + Rust, фронтенд — HTML/CSS и отдель
 | Релиз + инсталлятор | `npm run tauri build` | `Finished release` + NSIS (нужен ключ подписи, см. ниже) |
 | Пересборка установленной копии | `npm run redeploy` | сборка с ключом, тихая установка поверх прежней + запуск |
 | Лог свитчера | `%TEMP%\zapret-tools-switcher.log` | пишется всегда, в том числе в релизе; при 2 МБ уезжает в `.log.1` |
+| Консоль для агентов | `zapret-tools.exe cli status` | JSON: версия, конфиг, версии, запущенный winws; `cli help` — все команды |
 | Проверка фронтенда | `node --check src/app.js` | JS синтаксически валиден (сборщика нет) |
 
 Артефакты: `src-tauri/target/release/zapret-tools.exe`,
@@ -107,6 +108,21 @@ DNS/DoH и блокировка QUIC. Адаптеры и их DNS читают�
 ### `src-tauri/src/main.rs` — 2 строки
 
 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` — в релизе консоли нет.
+До `run()` разбираются два служебных режима: `--blockcheck-worker` и `cli`.
+
+### `src-tauri/src/cli.rs` (~640 строк) — консоль для агентов
+
+`zapret-tools.exe cli <команда>`: тот же бинарь и те же функции команд, но без окна,
+без Tauri и без single-instance (`main.rs` разбирает `cli` до `run()`). Вывод — JSON в
+stdout, ошибка — `{"error": ...}` в stderr с кодом 1, неверный вызов — код 2.
+Команды: `status`, `versions`, `lists`, `get`/`set` (списки доменов), `strategies`,
+`service`, `interfaces`, `dns get|set|reset`, `quic on|off|status`, `log`, `help`.
+Корень и активная версия по умолчанию — из `%APPDATA%\com.zapret.tools\config.json`,
+переопределяются `--root` и `--version`. Свитчер (хук клавиатуры) живёт только в GUI:
+из консоли читаются его настройки, управление — нет. `attach_console` подключается к
+консоли родителя: релизный бинарь собран с `windows_subsystem = "windows"` и без этого
+потерял бы вывод в терминале. Новые команды добавляются в `dispatch` и выводят
+`serde_json::Value`, а не форматированный текст.
 
 ### `src/index.html` (~1150 строк) + `src/app.js` (~2530 строк) — фронтенд
 
@@ -260,7 +276,7 @@ HTML и CSS в `index.html`, скрипт — отдельный `app.js` (`<scr
 
 ## 6. Текущее состояние версии
 
-Версия **1.0.0**. Источник — `package.json`; `CHANGELOG.md` описывает состав версии.
+Версия **1.3.3**. Источник — `package.json`; `CHANGELOG.md` описывает состав версии.
 
 Закоммичено:
 
@@ -287,11 +303,11 @@ HTML и CSS в `index.html`, скрипт — отдельный `app.js` (`<scr
 
 | Проблема | Детали |
 |---|---|
-| Настройка «проверять обновления» мертва | `auto_check_updates` читается/сохраняется, но `tauri-plugin-updater` нигде не вызывает `check()`; эндпоинт `github.com/example/...` и pubkey-заглушка в конфиге |
+| ~~Настройка «проверять обновления» мертва~~ | Решено: `auto_check_updates` управляет фоновой проверкой (`plugin:updater|check` через `scheduleAppUpdateCheck`), эндпоинт — `releases/latest/download/latest.json` репозитория `CurnMen/Zapret-tools`. Установка обновления автоматически не выполняется — показывается только уведомление |
 | ~~Вкладка «Сеть» медленная~~ | Решено в `64ffcd9`: IP Helper + COM, три запроса ~0,04 с (было 8,6 с). Резервные пути через PowerShell остались |
 | `lib.rs` всё ещё ~5060 строк | Первый этап разбиения сделан (`logs`, `win_cmd`, `network`). Дальше: `switcher.rs` (хук и правка), `hosts.rs`, `blockcheck.rs`, `versions.rs`. Двигать по одному модулю за коммит с прогоном тестов |
 | GUI не тестируется агентом | Окно Tauri недоступно обычному браузеру. Запуск можно проверить через WebView2 CDP: `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`, затем `curl http://127.0.0.1:9222/json`. Клики, свитчер и UAC — руками |
-| Updater не настроен | `security.csp` закрывает внешние источники; скрипты только `app.js` (`script-src 'self'`), инлайн-стили и `style`-атрибуты разрешены. Плагин updater всё ещё без `check()`; эндпоинт `github.com/example/...` и pubkey-заглушка в конфиге |
+| ~~Updater не настроен~~ | Решено: плагин подключён, эндпоинт и pubkey настоящие, обновления в `latest.json` подписаны; фронтенд проверяет версию и показывает тост |
 
 ---
 
@@ -339,3 +355,5 @@ HTML и CSS в `index.html`, скрипт — отдельный `app.js` (`<scr
 | 2026-11-23 | 1.3.2 | Blockcheck без прав больше не сыплет `os error 740`: сразу UAC и привилегированный воркер того же бинаря (`--blockcheck-worker`), JSON-задание под lock. Домены внутри стратегии опрашиваются параллельно, добавлена диагностика окружения в духе `service.bat` | `lib.rs`, `main.rs`, `index.html`, `AGENTS.md` | `cargo test --lib` (53), `fmt`, `clippy`; воркер напрямую вернул UTF-8 отчёт; полный UAC-прогон: `OK`, отчёт без предупреждения о правах |
 | 2026-11-23 | 1.3.2 | Геометрия окна восстанавливается (разрешения на set-size/set-position, сохранение `innerSize`), минимальный размер 960×680; консоль подстраивает отступ под число строк, убрана неоднородность при 1–2 сообщениях | `app.js`, `index.html`, `tauri.conf.json`, `capabilities/default.json` | превью: 1 строка — 94 px отступа, 13 строк — 212 px; перезапуск сохранения размера/позиции; `node --check` |
 | 2026-11-25 | 1.3.3 | Аудит blockcheck: `sc` разбирается по значению состояния (OEM-вывод, любая локаль), конфликты ищутся только по службам из `service.bat`, добавлены BFE и залипший WinDivert; `hosts` предупреждает только о блокирующих `0.0.0.0`/`127.0.0.1`. Ожидание `winws` адаптивное (1,2–2,5 с), клиент без idle-соединений, IPv4 пробуется раньше IPv6 (иначе «чёрная дыра» IPv6 съедала таймаут и стратегия ложно проваливалась); путь `winws.exe` с пробелами больше не даёт `[SKIP]`; файлы задания/результата удаляются, аргументы `-ArgumentList` в кавычках, воркер без аргументов завершается с кодом 2, а не открывает GUI. Консоль: `[WARN]` жёлтый, лимит 100 без потери новой строки, отступ 36 + 1 + тело | `lib.rs`, `main.rs`, `app.js`, `index.html`, `AGENTS.md`, `CHANGELOG.md` | `cargo test --lib` (57), `fmt`, `clippy -D warnings`, `node --check`, превью, воркер на пути с пробелами |
+| 2026-11-25 | 1.3.3 | DNS/DoH и блокировка QUIC больше не занимают главный поток: `set_dns`, `reset_dns`, `toggle_quic_block` стали `async`, UAC-PowerShell идёт через `spawn_blocking` (правило 6); окно остаётся отзывчивым, пока открыт запрос прав | `network.rs`, `AGENTS.md` | `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib` (57) |
+| 2026-11-28 | 1.3.3 | Консольный режим `cli`: агенты и скрипты управляют списками, службой и сетью без окна, ответ в JSON | `cli.rs`, `main.rs`, `lib.rs`, `Cargo.toml`, `AGENTS.md`, `README.md` | `cargo fmt --all -- --check`, `cargo clippy --all-targets -D warnings`, `cargo test --lib` (57); `cli status/versions/lists/get/set` на живом конфиге и временной папке |

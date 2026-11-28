@@ -222,8 +222,19 @@ fn validate_dns_address(value: &str, label: &str) -> Result<(), String> {
         .map_err(|_| format!("{label}: некорректный IP-адрес «{value}»"))
 }
 
+/// Выполняет UAC-скрипт в блокирующем потоке.
+///
+/// Синхронная команда с `run_elevated_script` держала главный поток всё
+/// время, пока открыт запрос прав: окно не перерисовывалось, спиннер стоял.
+async fn run_elevated(script: String) -> Result<(), String> {
+    match tokio::task::spawn_blocking(move || run_elevated_script(&script)).await {
+        Ok(result) => result,
+        Err(err) => Err(format!("не удалось выполнить команду: {err}")),
+    }
+}
+
 #[tauri::command]
-pub(crate) fn set_dns(
+pub(crate) async fn set_dns(
     interface_name: String,
     dns1: String,
     dns2: Option<String>,
@@ -278,11 +289,11 @@ if ($LASTEXITCODE -ne 0) {{ throw \"Не удалось изменить DNS (к
     }
 
     script.push_str("ipconfig /flushdns | Out-Null\r\n");
-    run_elevated_script(&script)
+    run_elevated(script).await
 }
 
 #[tauri::command]
-pub(crate) fn reset_dns(interface_name: String) -> Result<(), String> {
+pub(crate) async fn reset_dns(interface_name: String) -> Result<(), String> {
     let script = format!(
         "$name = {name}\r\n\
 netsh interface ip set dns name=\"$name\" source=dhcp | Out-Null\r\n\
@@ -290,7 +301,7 @@ if ($LASTEXITCODE -ne 0) {{ throw \"Не удалось сбросить DNS (к
 ipconfig /flushdns | Out-Null\r\n",
         name = ps_quote(&interface_name)
     );
-    run_elevated_script(&script)
+    run_elevated(script).await
 }
 
 // ---------- Блокировка QUIC ----------
@@ -298,7 +309,7 @@ ipconfig /flushdns | Out-Null\r\n",
 const QUIC_RULE_NAME: &str = "Zapret Tools Block QUIC";
 
 #[tauri::command]
-pub(crate) fn toggle_quic_block(enable: bool) -> Result<(), String> {
+pub(crate) async fn toggle_quic_block(enable: bool) -> Result<(), String> {
     let rule = ps_quote(QUIC_RULE_NAME);
     let script = if enable {
         format!(
@@ -309,7 +320,7 @@ if ($LASTEXITCODE -ne 0) {{ throw \"Не удалось создать прав�
     } else {
         format!("netsh advfirewall firewall delete rule name={rule} | Out-Null\r\n")
     };
-    run_elevated_script(&script)
+    run_elevated(script).await
 }
 
 #[tauri::command]

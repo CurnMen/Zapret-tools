@@ -3137,6 +3137,8 @@ fn ensure_keyboard_layout(_to_russian: bool) {}
 
 // Модули, вынесенные из этого файла. network открыт для generate_handler!,
 // потому что команды регистрируются по полному пути.
+// cli открыт наружу: из него `main.rs` запускает консольный режим.
+pub mod cli;
 mod logs;
 pub(crate) mod network;
 mod win_cmd;
